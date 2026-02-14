@@ -1,0 +1,43 @@
+# Import necessary libraries
+import pandas as pd 
+
+def env_data(stations = None)
+# Data processing: https://pandas.pydata.org/docs/
+
+    #define stations meteo swiss
+    if stations is None:
+        stations = [{'name': 'Biere', 'id': 'BIE'},
+                    {'name': 'St.Prex', 'id': 'PSI'},
+                    {'name': 'Vevey / Corseaux', 'id': 'VEV'},
+                    {'name': 'Villars-Tiercelin','id': 'VIT' },
+                    {'name': 'Mathod', 'id': 'MAR'},
+                    {'name': 'Bullet / La Fretaz', 'id': 'FRU'}]
+
+    dict_all = {}
+    for station in stations:
+        try:
+            station_name = station['name']
+            id = station['id']
+            historical_url = f"https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/{id.lower()}/ogd-smn_{id.lower()}_t_historical_2020-2029.csv"
+            #recent_url = f"https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/{id.lower()}/ogd-smn_{id.lower()}_t_recent.csv"
+            
+            df_all = pd.read_csv(historical_url, delimiter=';')
+            #df_recent = pd.read_csv(recent_url, delimiter=';')
+            #df_all = pd.concat([df_historic, df_recent])
+            df_all['timestamp'] = pd.to_datetime(df_all['reference_timestamp'], format='%d.%m.%Y %H:%M', utc=True)
+            df_all['t_2m_C'] = df_all['tre200s0'] # Lufttemperatur 2 m über Boden; Momentanwert
+            df_all['global_rad_W'] = df_all['gre000z0'] # Globalstrahlung; Zehnminutenmittel
+            df_all['wind_speed_10m_ms'] = df_all['fkl010z0'] # Windgeschwindigkeit skalar; Zehnminutenmittel in m/s
+            df_all['snow_depth_cm'] = df_all['htoauts0'] # Schneehöhe (automatisch gemessen); Momentanwert
+            df_all = df_all[['timestamp', 't_2m_C', 'global_rad_W', 'wind_speed_10m_ms', 'snow_depth_cm']]
+            #df_all['station'] = station_name
+            dict_all[station_name] = df_all
+        except Exception as e:
+            print(f"Could not process station {station['name']} with id {station['id']}. Error: {e}")
+            continue
+    combined_df = pd.concat(dict_all.values())
+    average_df = combined_df.groupby(level=0).mean(numeric_only=True)
+    average_df.index = combined_df['timestamp'].unique()
+
+    return combined_df, average_df
+
