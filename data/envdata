@@ -1,8 +1,8 @@
 # Import necessary libraries
 import pandas as pd 
 
-def env_data(stations = None)
-# Data processing: https://pandas.pydata.org/docs/
+def env_data(stations = None):
+    # Data processing: https://pandas.pydata.org/docs/
 
     #define stations meteo swiss
     if stations is None:
@@ -40,4 +40,5 @@ def env_data(stations = None)
     average_df.index = combined_df['timestamp'].unique()
 
     return combined_df, average_df
+
 
