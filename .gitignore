@@ -1,0 +1,37 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.mypy_cache/
+.ruff_cache/
+
+# IDE / editor
+.idea/
+.vscode/
+
+# Environment variables (secrets)
+.env
+.env.local
+
+# Build / distribution
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Optional: uncomment if you generate large outputs
+# data/out/
+# outputs/
