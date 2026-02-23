@@ -1,7 +1,15 @@
-# Core data processing (used by data/envdata)
+# Data loading
 pandas>=2.0,<3
+pyarrow>=11.0,<16   # used by pandas for read_parquet / to_parquet
+numpy>=1.24,<3
+sqlalchemy>=2.0,<3  # used by pandas read_sql_query for SQLite (load_dataport)
 
-# Add when implementing model scripts, e.g.:
-# numpy>=1.24,<3
+# Exploration / plotting
+matplotlib>=3.7,<4
+
+# Optional: ipython for notebook-style "Run Cell" and rich display of DataFrames
+ipython>=8.0,<9
+
+# Uncomment when implementing model scripts:
 # scikit-learn>=1.3,<2
 # scipy>=1.10,<2
