@@ -33,11 +33,17 @@ build/
 .DS_Store
 Thumbs.db
 
-# Optional: uncomment if you generate large outputs
-data/out/
-data/raw_data/
-data/processed_data/
-data/re_data/
-# outputs
+# Project data (ignore contents, keep folders)
+data/out/*
+data/raw_data/*
+data/processed_data/*
+data/re_data/*
 
+# Keep folder structure
+!data/raw_data/.gitkeep
+!data/processed_data/.gitkeep
+!data/re_data/.gitkeep
+!data/out/.gitkeep
+
+# Local scripts
 local_scripts/

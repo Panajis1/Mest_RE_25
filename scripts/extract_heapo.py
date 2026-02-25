@@ -1,10 +1,10 @@
 from pathlib import Path
 import pandas as pd
 
-# 📂 입력 폴더 (이미 복사 완료한 위치)
+# input folder containing raw CSV files
 INPUT_DIR = Path("data/raw_data/heapo")
 
-# 📦 출력 파일
+# output file for processed data
 OUTPUT_FILE = Path("data/processed_data/heapo_hp_long.parquet")
 
 SOURCE = "Heapo"
@@ -26,7 +26,7 @@ def main():
 
         df = pd.read_csv(f, sep=";")
 
-        # 필수 컬럼 체크
+        # check required columns
         required_cols = {"Household_ID", "Timestamp", "kWh_received_HeatPump"}
         missing = required_cols - set(df.columns)
         if missing:
@@ -35,7 +35,7 @@ def main():
         # Timestamp → datetime (UTC)
         df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True)
 
-        # 15분 kWh → 평균 kW
+        # 15 min kWh → average kW
         df["HP_kW"] = pd.to_numeric(df["kWh_received_HeatPump"], errors="coerce") * 4
 
         df_out = pd.DataFrame({
@@ -50,7 +50,7 @@ def main():
 
     all_data = pd.concat(dfs, ignore_index=True).dropna()
 
-    # 중복 timestamp 정리
+    # drop overlapping timestamps
     all_data = (
         all_data.groupby(
             ["Source", "ID customer", "type", "dt_utc"],

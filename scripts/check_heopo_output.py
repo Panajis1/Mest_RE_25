@@ -18,7 +18,7 @@ print(df["Value_KW_mean"].describe())
 
 print("\nshare zero:", (df["Value_KW_mean"] == 0).mean())
 
-# 한 고객 샘플의 time step 확인
+# Check one customer sample's time step 
 cid = df["ID customer"].iloc[0]
 s = df[df["ID customer"] == cid].sort_values("dt_utc").head(40)
 diffs = s["dt_utc"].diff().dropna().value_counts()
