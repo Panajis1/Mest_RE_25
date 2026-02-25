@@ -63,7 +63,7 @@ def main():
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     all_data.to_parquet(OUTPUT_FILE, index=False)
 
-    print("✅ Saved:", OUTPUT_FILE)
+    print("Saved:", OUTPUT_FILE)
     print(all_data.head())
 
 
