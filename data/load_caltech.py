@@ -8,7 +8,7 @@ from datetime import datetime
 API_TOKEN = 'FYwu13iH11r7fJB_iXOvP3hwjURr3CWyITcGkmYwVwE'  # Register at ev.caltech.edu/dataset
 SITE_ID = 'caltech'            # 'caltech' or 'jpl'
 BASE_URL = "https://ev.caltech.edu/api/v1"
-FILENAME = "caltech_ev_15min_full.parquet"
+FILENAME = "processed_data/caltech_ev_15min_full.parquet"
 HEADERS = {'Authorization': f'Bearer {API_TOKEN}'}
 
 def get_last_timestamp(file_path):
