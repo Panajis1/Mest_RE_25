@@ -5,10 +5,8 @@ import time
 from datetime import datetime
 
 #session ID -> customer ID (only 1 charging event per customer ID)
-#spaceID -> customer ID (parking space identifier, which is more consistent with the idea of a "customer" in this context)
 #data is not measured in kW but in amps, so we need to convert it using the voltage (208V for Caltech):
 #amps * voltage -> Val_KW_mean (in kW)
-#all data is for EV charging 
 
 
 # --- CONFIGURATION ---
@@ -38,9 +36,8 @@ def fetch_and_preprocess():
         if not items: break
             
         session = items[0]
-        
-        # ADJUSTMENT: Using spaceID instead of sessionID for the customer identifier
-        space_id = session.get('spaceID')
+        # Using sessionID as the unique identifier for ID customer
+        session_id = session.get('sessionID')
         
         # Accessing the time series of measured current draw
         ts_data = session.get('chargingCurrent', {})
@@ -50,7 +47,7 @@ def fetch_and_preprocess():
         for t, a in zip(times, amps):
             all_rows.append({
                 'dt_utc': t,
-                'ID customer': space_id, # This now stores the space ID
+                'ID customer': session_id,
                 'Value_KW_mean': (a * VOLTAGE) / 1000.0
             })
             
@@ -65,11 +62,11 @@ def fetch_and_preprocess():
         print("No data collected. Please verify your token and siteID.")
         return
 
-    # --- Formatting to match schema ---
+    # --- Formatting to match uploaded schema ---
     df = pd.DataFrame(all_rows)
     df['dt_utc'] = pd.to_datetime(df['dt_utc'], utc=True)
     
-    # Resample to 15-minute intervals per space ID to get the mean kW
+    # Resample to 15-minute intervals per customer to get the mean kW
     df_final = (
         df.groupby('ID customer')
         .resample('15min', on='dt_utc')
@@ -77,11 +74,11 @@ def fetch_and_preprocess():
         .reset_index()
     )
     
-    # Add constant labels
+    # Add constant labels as defined in your request
     df_final['Source'] = 'Caltech'
     df_final['type'] = 'EV'
     
-    # Apply strict column ordering
+    # Apply strict column ordering from your reference image
     column_order = ['Source', 'ID customer', 'type', 'Value_KW_mean', 'dt_utc']
     df_final = df_final[column_order]
 
@@ -91,4 +88,3 @@ def fetch_and_preprocess():
 
 if __name__ == "__main__":
     fetch_and_preprocess()
-    
