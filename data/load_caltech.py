@@ -16,7 +16,7 @@ TOKEN = 'FYwu13iH11r7fJB_iXOvP3hwjURr3CWyITcGkmYwVwE'
 SITE = 'caltech'
 VOLTAGE = 208 
 OUTPUT_PATH = "data/preprocessed_data/caltech_15min_kw.parquet"
-MAX_SESSIONS = 50 
+MAX_SESSIONS = 50 # Adjust this number based on how many sessions you want to fetch (max 1000 for free tier)
 
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 

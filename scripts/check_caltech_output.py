@@ -11,7 +11,7 @@ try:
 
     # Display the first 10 rows
     print("--- First 10 Rows of Processed Data ---")
-    print(df_verify.head(3))
+    print(df_verify.head(10))
 
     # Verify data types and non-null counts
     print("\n--- Data Information ---")
@@ -27,7 +27,7 @@ except FileNotFoundError:
 df = pd.read_parquet(file_path)
 
 # 2. Select the first few unique customers to display
-unique_customers = df['ID customer'].unique()[:3]
+unique_customers = df['ID customer'].unique()[:5]
 subset_df = df[df['ID customer'].isin(unique_customers)]
 
 # 3. Create the plot
