@@ -27,7 +27,7 @@ def get_weather_timeseries(
     end: str,
     location_name: Optional[str] = None,
     unit: str = "metric",
-    out: Optional[str] = None,
+    out_path: Optional[str] = None,
     show_plot: bool = False,
 ) -> pd.DataFrame:
     """
@@ -44,7 +44,7 @@ def get_weather_timeseries(
         For metadata only; not sent to the API.
     unit : {'metric','imperial','celsius','fahrenheit'}
         Temperature unit (maps to Open-Meteo 'celsius' or 'fahrenheit').
-    out : str, optional
+    out_path : str, optional
         If provided, path to save the timeseries as CSV.
     show_plot : bool
         If True, show a quick matplotlib plot (if matplotlib is installed).
@@ -121,23 +121,32 @@ def get_weather_timeseries(
             f"time={len(times)}, temperature_2m={len(temps)}, shortwave_radiation={len(sw_rad)}."
         )
 
-    # Build DataFrame (times are already in local time per timezone=auto)
-    df = pd.DataFrame(
-    {
-        "time": pd.to_datetime(times),
-        "temperature_2m": temps,
-        "shortwave_radiation": sw_rad,
-    }
-    ).set_index("time")
-    df.index.name = "time"
+    # Build timezone-aware local DatetimeIndex (times are local per timezone=auto)
+    tz_name = data.get("timezone") or "UTC"
+    dt_local = pd.to_datetime(times).tz_localize(tz_name)
 
-    #linear interpolation to 15‑min grid
-    df_15min = df.resample("15min").interpolate("time")
+    df_local = pd.DataFrame(
+        {
+            "temperature_2m": temps,
+            "shortwave_radiation": sw_rad,
+        },
+        index=dt_local,
+    )
 
+    # Linear interpolation to a 15‑minute grid
+    df_15min = df_local.resample("15min").interpolate("time")
 
+    # Create explicit local and UTC timestamp columns and drop time index
+    dt_local_resampled = df_15min.index
+    dt_utc_resampled = dt_local_resampled.tz_convert("UTC")
+
+    out = df_15min.copy()
+    out.insert(0, "dt_local", dt_local_resampled)
+    out.insert(1, "dt_utc", dt_utc_resampled)
+    out = out.reset_index(drop=True)
 
     # Attach metadata (including 'near station' interpretation)
-    df.attrs["meta"] = {
+    out.attrs["meta"] = {
         "location_name": location_name,
         "latitude": data.get("latitude"),
         "longitude": data.get("longitude"),
@@ -153,8 +162,8 @@ def get_weather_timeseries(
     }
 
     # Optional: save to CSV
-    if out is not None:
-        df.to_csv(out, index_label="time")
+    if out_path is not None:
+        out.to_csv(out_path, index=False)
 
     # Optional: quick plot
     if show_plot:
@@ -164,25 +173,27 @@ def get_weather_timeseries(
             # Silent fallback; caller still gets df
             pass
         else:
-            ax = df["temperature_2m"].plot(
+            ax = df_15min["temperature_2m"].plot(
                 figsize=(10, 5),
                 color="tab:red",
                 label="Temperature 2m",
             )
-            ax.set_ylabel(df.attrs["meta"]["temperature_unit"] or "Temperature")
+            ax.set_ylabel(out.attrs["meta"]["temperature_unit"] or "Temperature")
             ax2 = ax.twinx()
-            df["shortwave_radiation"].plot(
+            df_15min["shortwave_radiation"].plot(
                 ax=ax2,
                 color="tab:blue",
                 label="Shortwave radiation",
             )
-            ax2.set_ylabel(df.attrs["meta"]["shortwave_radiation_unit"] or "Shortwave radiation")
+            ax2.set_ylabel(
+                out.attrs["meta"]["shortwave_radiation_unit"] or "Shortwave radiation"
+            )
             ax.set_xlabel("Time (local)")
             ax.set_title("Hourly temperature and shortwave solar radiation")
             plt.tight_layout()
             plt.show()
 
-    return df
+    return out
 
 #%%
 
@@ -194,8 +205,6 @@ df = get_weather_timeseries(
     end="2024-01-03",
     location_name="Paris",
     unit="metric",
-    out="paris_weather.csv",
-    show_plot=True,
 )
 df
 # %%
