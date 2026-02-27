@@ -123,13 +123,18 @@ def get_weather_timeseries(
 
     # Build DataFrame (times are already in local time per timezone=auto)
     df = pd.DataFrame(
-        {
-            "time": pd.to_datetime(times),
-            "temperature_2m": temps,
-            "shortwave_radiation": sw_rad,
-        }
+    {
+        "time": pd.to_datetime(times),
+        "temperature_2m": temps,
+        "shortwave_radiation": sw_rad,
+    }
     ).set_index("time")
     df.index.name = "time"
+
+    #linear interpolation to 15‑min grid
+    df_15min = df.resample("15min").interpolate("time")
+
+
 
     # Attach metadata (including 'near station' interpretation)
     df.attrs["meta"] = {
@@ -180,6 +185,8 @@ def get_weather_timeseries(
     return df
 
 #%%
+
+# Example usage
 df = get_weather_timeseries(
     lat=48.8566,
     lon=2.3522,
