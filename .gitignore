@@ -39,6 +39,11 @@ data/raw_data/*
 data/processed_data/*
 data/re_data/*
 
+# Specific large datasets (keep out of repo)
+data/pv_estonia.parquet
+data/Smartnialmeter_house_19_HP.parquet
+data/Smartnialmeter_house4_EV.parquet
+
 # Keep folder structure
 !data/raw_data/.gitkeep
 !data/processed_data/.gitkeep
