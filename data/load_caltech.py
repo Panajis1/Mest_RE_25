@@ -1,3 +1,4 @@
+# %%
 import requests
 import pandas as pd
 import os
@@ -19,11 +20,12 @@ OUTPUT_PATH = "data/preprocessed_data/caltech_15min_kw.parquet"
 MAX_SESSIONS = 50 # Adjust this number based on how many sessions you want to fetch (max 1000 for free tier)
 
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-
+# %%
 def fetch_and_preprocess():
     url = f"https://ev.caltech.edu/api/v1/sessions/{SITE}/ts"
     all_rows = []
     page = 1
+    site_timezone = None
     
     print(f"Starting fetch (Limit: {MAX_SESSIONS} sessions)...")
     
@@ -38,6 +40,13 @@ def fetch_and_preprocess():
         if not items: break
             
         session = items[0]
+
+        # Record site timezone (e.g. 'America/Los_Angeles'). All timestamps
+        # returned by the API are in UTC and should be interpreted in this
+        # timezone for local time.
+        if site_timezone is None:
+            print(f"Site timezone: {session.get('timezone')}")
+            site_timezone = session.get("timezone") or "UTC"
         
         # ADJUSTMENT: Using spaceID instead of sessionID for the customer identifier
         space_id = session.get('spaceID')
@@ -76,13 +85,19 @@ def fetch_and_preprocess():
         .mean(numeric_only=True)
         .reset_index()
     )
+
+    # Derive local time column using the site timezone. According to
+    # ACN-Data docs, timestamps are stored in UTC and the 'timezone'
+    # field gives the local timezone of the site.
+    tz_name = site_timezone or "UTC"
+    df_final['dt_local'] = df_final['dt_utc'].dt.tz_convert(tz_name)
     
     # Add constant labels
     df_final['Source'] = 'Caltech'
     df_final['type'] = 'EV'
     
-    # Apply strict column ordering
-    column_order = ['Source', 'ID customer', 'type', 'Value_KW_mean', 'dt_utc']
+    # Apply strict column ordering (dt_local is added as an extra column)
+    column_order = ['Source', 'ID customer', 'type', 'Value_KW_mean', 'dt_utc', 'dt_local']
     df_final = df_final[column_order]
 
     # Save to Parquet format
@@ -92,3 +107,6 @@ def fetch_and_preprocess():
 if __name__ == "__main__":
     fetch_and_preprocess()
     
+# %%
+ct = pd.read_parquet(OUTPUT_PATH)
+# %%

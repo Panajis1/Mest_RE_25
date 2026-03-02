@@ -91,7 +91,9 @@ def get_weather_timeseries(
         "start_date": start_dt.isoformat(),
         "end_date": end_dt.isoformat(),
         "hourly": ["temperature_2m", "shortwave_radiation"],
-        "timezone": "auto",  # local time for the given coordinates
+        # Use UTC to avoid DST ambiguity in local timestamps; we can always
+        # convert to a local timezone downstream if needed.
+        "timezone": "UTC",
         "temperature_unit": temperature_unit,
     }
 
@@ -121,7 +123,7 @@ def get_weather_timeseries(
             f"time={len(times)}, temperature_2m={len(temps)}, shortwave_radiation={len(sw_rad)}."
         )
 
-    # Build timezone-aware local DatetimeIndex (times are local per timezone=auto)
+    # Build timezone-aware DatetimeIndex. Times are returned in UTC (no DST ambiguity).
     tz_name = data.get("timezone") or "UTC"
     dt_local = pd.to_datetime(times).tz_localize(tz_name)
 

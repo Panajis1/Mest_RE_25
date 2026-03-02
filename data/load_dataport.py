@@ -1,5 +1,5 @@
 """Load Pecan Street Dataport data: 15-min circuit data, EV metadata, weather, pricing events."""
-
+# %%
 import gzip
 import io
 import zipfile
@@ -42,7 +42,7 @@ COLS_HP = ["furnace1", "furnace2", "heater1", "heater2", "heater3"]
 COLS_PV = ["solar", "solar2"]
 COLS_AC = ["air1", "air2", "air3", "airwindowunit1"]
 
-
+# %%
 def _data_dir_path(data_dir: Optional[Union[Path, str]] = None) -> Path:
     return Path(data_dir or _DEFAULT_DATA_PORT_DIR)
 
@@ -100,9 +100,14 @@ def load_15min_data(
     query += " ORDER BY dataid, local_15min"
 
     df = pd.read_sql_query(query, f"sqlite:///{path}")
-    # Parse timestamps as UTC to avoid mixed tz-aware/naive issues; downstream code
-    # treats this as the UTC time base.
-    df["local_15min"] = pd.to_datetime(df["local_15min"], utc=True, errors="coerce")
+    # Dataport stores a column named `local_15min` which represents local wall-clock time.
+    # In the raw SQLite it often appears with a fixed numeric offset suffix (e.g. "-05", "-06").
+    # Those offsets are not reliably consistent with region labels, so we intentionally ignore
+    # them here and keep `local_15min` as a *naive* local wall-clock timestamp. Downstream code
+    # localizes by region timezone to derive both dt_local (tz-aware) and dt_utc (UTC).
+    s = df["local_15min"].astype(str)
+    s = s.str.replace(r"([+-]\d{2})$", "", regex=True)
+    df["local_15min"] = pd.to_datetime(s, errors="coerce")
 
     for col in df.columns:
         if col in ("dataid", "local_15min"):
@@ -198,8 +203,11 @@ def load_pr_realpower_15min(
 
     with gzip.open(path, "rt", encoding="utf-8") as f:
         df = pd.read_csv(f)
-    # Parse timestamps as UTC for consistency with SQLite loader.
-    df["local_15min"] = pd.to_datetime(df["local_15min"], utc=True, errors="coerce")
+    # Same parsing strategy as the SQLite loader: treat local_15min as naive local wall-clock time
+    # and ignore any trailing fixed-offset suffix (e.g. "-05", "-06").
+    s = df["local_15min"].astype(str)
+    s = s.str.replace(r"([+-]\d{2})$", "", regex=True)
+    df["local_15min"] = pd.to_datetime(s, errors="coerce")
 
     for col in df.columns:
         if col in ("dataid", "local_15min"):
@@ -357,3 +365,8 @@ def load_civita_text_messages(data_dir: Optional[Union[Path, str]] = None) -> pd
             df = pd.read_csv(io.BytesIO(f.read()))
     df["datetime_sent_cstcdt"] = pd.to_datetime(df["datetime_sent_cstcdt"])
     return df
+
+# %%
+path = '/Users/alan/Desktop/ETH/cs_re/Mest_RE_25/data/raw_data/data_port'
+load_15min_data(data_dir=path, region="california")
+# %%

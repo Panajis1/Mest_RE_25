@@ -1,9 +1,16 @@
+# %%
 import pandas as pd
 import matplotlib.pyplot as plt
+import sys
+from pathlib import Path
+
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
 
 # Define the path where the file was saved
-file_path = "data/preprocessed_data/caltech_15min_kw.parquet"
+file_path = "/Users/alan/Desktop/ETH/cs_re/Mest_RE_25/data/preprocessed_data/caltech_15min_kw.parquet"
 
 try:
     # Load the Parquet file
@@ -27,7 +34,7 @@ except FileNotFoundError:
 df = pd.read_parquet(file_path)
 
 # 2. Select the first few unique customers to display
-unique_customers = df['ID customer'].unique()[:5]
+unique_customers = df['ID customer'].unique()[:10]
 subset_df = df[df['ID customer'].isin(unique_customers)]
 
 # 3. Create the plot
@@ -49,3 +56,4 @@ plt.tight_layout()
 
 # 4. Display or save
 plt.show()
+# %%
