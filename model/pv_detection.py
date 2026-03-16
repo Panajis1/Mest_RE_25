@@ -59,7 +59,10 @@ def load_re_data():
     data_dir = Path(__file__).resolve().parent.parent / "data" / "re_data" / "ETHZ"
     re_data_gen = re_data.load_all_data_generator(str(data_dir))
     re_data_df = pd.concat(re_data_gen, ignore_index=True)
-    re_data_df["DT_UTC"] = pd.to_datetime(re_data_df["DT_UTC"], utc=True)
+    # Ensure timestamps are UTC, then strip tz so they are naive-UTC
+    # (matching the tz-naive meteo index from env_data)
+    dt = pd.to_datetime(re_data_df["DT_UTC"], utc=True)
+    re_data_df["DT_UTC"] = dt.dt.tz_convert(None)
 
     customer_summary = (
         re_data_df.groupby("ID").agg(
@@ -362,10 +365,10 @@ def plot_customer_timeseries(
         raise ValueError(f"No data found for customer {customer_id}")
 
     if start is not None:
-        start_ts = pd.to_datetime(start, utc=True)
+        start_ts = pd.to_datetime(start)
         df = df[df["DT_UTC"] >= start_ts]
     if end is not None:
-        end_ts = pd.to_datetime(end, utc=True)
+        end_ts = pd.to_datetime(end)
         df = df[df["DT_UTC"] <= end_ts]
 
     fig = go.Figure()
@@ -452,7 +455,7 @@ def plot_customer_capacity_validation(
         print(f"Warning: Customer {customer_id} has absolutely zero export.")
         best_day = df['DT_UTC'].max()
     else:
-        best_day = pd.to_datetime(daily_export.idxmax(), utc=True)
+        best_day = pd.to_datetime(daily_export.idxmax())
     
     # Create a 7-day window centered roughly around their best production day
     start_date = best_day - pd.Timedelta(days=3)
@@ -1847,7 +1850,8 @@ def process_customers_streaming(
     def _merge_and_features(raw_df: pd.DataFrame) -> tuple:
         """Merge meteo and build daily features for a batch of customers."""
         raw_df = raw_df.copy()
-        raw_df["DT_UTC"] = pd.to_datetime(raw_df["DT_UTC"], utc=True)
+        dt = pd.to_datetime(raw_df["DT_UTC"], utc=True)
+        raw_df["DT_UTC"] = dt.dt.tz_convert(None)
         merged = raw_df.merge(meteo_for_merge, on="DT_UTC", how="left")
         daily, _ = build_daily_features(avg_meteo_15min, merged)
         return merged, daily

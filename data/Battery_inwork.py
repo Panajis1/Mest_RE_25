@@ -7,7 +7,8 @@ import seaborn as sns
 #%%
 # 1. Setup & Data Loading
 DIR = "C:\\Users\\Aline\\Documents\\Studium\\Case Study\\processed_data\\ETHZ"
-weather_df = envdata.env_data().sort_index()
+_, weather_df = envdata.env_data()
+weather_df = weather_df.sort_index()
 
 # Fix precision for merge (Unit mismatch fix)
 weather_df.index = weather_df.index.as_unit('us')
