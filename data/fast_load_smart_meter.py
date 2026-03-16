@@ -53,6 +53,45 @@ def process_single_file(file_path: str, valid_ids_set: Set[str], target_meta: pd
 # If problems with ram occur, adjust the batch_size=1 when calling the function 
 #Default function filters only for individual housholds named "Particuliers"
 
+#use following code snippet to test the function and get a quick overview of the data. Adjust the batch_size for faster loading if needed.
+"""
+results_collector = []
+
+data_gen = load_all_data_parallel_generator(data_dir, partner_type="Particuliers", batch_size=2)
+
+for batch_df in data_gen:
+    # 1. Update Global Metrics (e.g., Fleet Average)
+    # batch_df["CONSO_KWH"].mean() 
+
+    # 2. Process Individual Customers
+    for customer_id, customer_data in batch_df.groupby("ID"):
+        
+        # --- PREPARE ---
+        # Ensure DT_UTC is the index for time-based battery logic
+        customer_data = customer_data.set_index("DT_UTC").sort_index()
+
+        # --- ANALYZE ---
+               
+        # Run your battery probability logic
+        # analysis = call application_detection_function(customer_data, weather_df)
+        # 
+        # --- STORE ---
+        results_collector.append({
+            "ID": customer_id,
+            "is_zero_production": is_zero_prod,
+            "avg_conso": customer_data["CONSO_KWH"].mean(),
+            # "battery_prob": analysis["prob"]
+        })
+
+    # 3. CLEANUP (Crucial for Windows)
+    del batch_df
+    gc.collect()
+
+# 4. SAVE FINAL OUTPUT
+final_results = pd.DataFrame(results_collector)
+final_results.to_parquet("final_analysis_report.parquet")
+""" 
+
 def load_all_data_parallel_generator(
     data_dir: str, 
     partner_type: str = "Particuliers",
