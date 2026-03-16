@@ -138,10 +138,3 @@ def load_all_data_parallel_generator(
 
     logger.info("Data loading sequence complete.")
 
-# --- EXECUTION ---
-if __name__ == "__main__":
-    DIR = "./data_folder"
-    for batch in load_all_data_parallel_generator(DIR):
-        # Do your work
-        del batch
-        gc.collect()
