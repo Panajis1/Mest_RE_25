@@ -248,3 +248,181 @@ print(f"Battery Probability Score: {prob_score}/100")
 print(f"The evening peak is delayed by {minutes_shifted} minutes on sunny/normal days.")
 
 # %%
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import ranksums
+
+# Custom module imports
+import envdata
+import load_smart_meter
+import preprocessing
+
+def calculate_battery_logistic_prob(profile_dark, profile_norm, p_val):
+    """
+    Applies a Logistic Regression framework to physical evening profiles.
+    Returns a probability percentage.
+    """
+    # 1. Feature Extraction: Peak Shift (X1)
+    # How many 15-min intervals did the peak move?
+    peak_idx_dark = np.argmax(profile_dark.values)
+    peak_idx_norm = np.argmax(profile_norm.values)
+    x1_shift_mins = (peak_idx_norm - peak_idx_dark) * 15
+    
+    # 2. Feature Extraction: Energy Substitution Ratio (X2)
+    # Area Under Curve (AUC) difference between 16:00 and 22:00
+    auc_dark = np.trapz(profile_dark.values)
+    auc_norm = np.trapz(profile_norm.values)
+    x2_gap_ratio = (auc_dark - auc_norm) / auc_dark if auc_dark > 0 else 0
+
+    # 3. Logistic Regression Coefficients (Beta)
+    # These are calibrated for residential battery behavior
+    # intercept (b0), shift_weight (b1), gap_weight (b2)
+    b0 = -4.5  # Bias (assumes batteries are relatively rare)
+    b1 = 0.08  # ~1.2 hour shift makes battery very likely
+    b2 = 5.0   # ~30% energy gap makes battery very likely
+    
+    # Linear Combination (z)
+    z = b0 + (b1 * x1_shift_mins) + (b2 * x2_gap_ratio)
+    
+    # Logistic Function (Sigmoid)
+    # P(y=1) = 1 / (1 + e^-z)
+    probability = 1 / (1 + np.exp(-z))
+    
+    # 4. Statistical Adjustment
+    # If the difference isn't significant (p > 0.05), we penalize the probability
+    if p_val > 0.05:
+        probability *= 0.5 
+
+    return {
+        "probability": round(probability * 100, 2),
+        "features": {
+            "shift_mins": x1_shift_mins,
+            "gap_ratio": round(x2_gap_ratio, 3),
+            "significance_p": round(p_val, 4)
+        }
+    }
+
+
+def analyze_customer_battery(file_path, weather_df, temp_buffer=2.0, rad_threshold=100):
+    """
+    Analyzes a single PV-customer to detect battery storage via 
+    temperature-matched evening profiles (16:00 - 24:00).
+    """
+    # --- 1. Load and Standardize Data ---
+    df_raw = load_smart_meter.load_customer_data(file_path)
+    if df_raw.empty:
+        return None
+    
+    # Preprocessing (15-min resampling)
+    df_customer = preprocessing.clean_and_resample(df_raw)
+    
+    # Set Index and fix Precision Unit Mismatch (ms vs us)
+    if 'DT_UTC' in df_customer.columns:
+        df_customer = df_customer.set_index('DT_UTC')
+        df_customer.index = df_customer.index.as_unit('ms')
+    
+
+    df_customer.index = df_customer.index.as_unit('ms')
+    df_customer = df_customer.sort_index()
+
+    # --- 2. Merge Weather Data ---
+    merged = pd.merge_asof(
+        df_customer, 
+        weather_df, 
+        left_index=True, 
+        right_index=True, 
+        direction='backward'
+    )
+
+    # --- 3. Temperature-Matched Filtering ---
+    # Create daily metrics to find comparable thermal loads
+    daily = merged.resample('D').agg({
+        't_2m_C': 'mean',
+        'global_rad_W': 'max'
+    }).dropna()
+
+    # Define Dark Days (Gloomy/Winter-like)
+    dark_days_idx = daily[daily['global_rad_W'] < rad_threshold].index
+    if len(dark_days_idx) < 2:
+        return {"error": "Insufficient dark days found"}
+
+    avg_temp_dark = daily.loc[dark_days_idx, 't_2m_C'].mean()
+
+    # Find Normal Days (Sunny) with the SAME average temperature
+    matched_normal_idx = daily[
+        (daily['global_rad_W'] >= rad_threshold) & 
+        (daily['t_2m_C'].between(avg_temp_dark - temp_buffer, avg_temp_dark + temp_buffer))
+    ].index
+
+    if len(matched_normal_idx) < 2:
+        return {"error": f"No normal days found matching {avg_temp_dark:.1f}C"}
+
+    # --- 4. Extract Aggregated Evening Profiles (16:00 - 24:00) ---
+    is_dark = pd.Series(merged.index.date).isin(dark_days_idx.date).values
+    is_norm = pd.Series(merged.index.date).isin(matched_normal_idx.date).values
+
+    dark_ev = merged[is_dark].between_time('16:00', '23:59')
+    norm_ev = merged[is_norm].between_time('16:00', '23:59')
+
+    profile_dark = dark_ev.groupby(dark_ev.index.time)['CONSO_KWH'].mean()
+    profile_norm = norm_ev.groupby(norm_ev.index.time)['CONSO_KWH'].mean()
+
+    # --- 5. Battery Metrics ---
+    # A: Peak Shift (Batteries delay grid peak)
+    peak_idx_dark = np.argmax(profile_dark.values)
+    peak_idx_norm = np.argmax(profile_norm.values)
+    shift_mins = (peak_idx_norm - peak_idx_dark) * 15
+
+    # B: Ramp Difference (16:00 to 18:00)
+    # If the surge at sunset is 'suppressed' on sunny days, it indicates a battery
+    ramp_dark = profile_dark.iloc[8] - profile_dark.iloc[0]
+    ramp_norm = profile_norm.iloc[8] - profile_norm.iloc[0]
+    ramp_ratio = ramp_dark / max(ramp_norm, 0.01)
+
+    # C: Statistical Test (Energy Gap 16:00 - 20:00)
+    energy_dark = dark_ev.between_time('16:00', '20:00').groupby(level=0).sum()['CONSO_KWH']
+    energy_norm = norm_ev.between_time('16:00', '20:00').groupby(level=0).sum()['CONSO_KWH']
+    _, p_val = ranksums(energy_dark, energy_norm)
+
+    #-----5.5. Battery Probability Score (Logistic Regression)-----
+    # --- Implementation Example ---
+    # Assuming 'profile_dark', 'profile_norm', and 'p_val' are ready from previous steps:
+    result = calculate_battery_logistic_prob(profile_dark, profile_norm, p_val)
+
+    print(f"Logistic Probability of Battery: {result['probability']}%")
+    print(f"Shift Detected: {result['features']['shift_mins']} minutes")
+    print(f"Energy Substitution: {result['features']['gap_ratio']*100}%")
+
+
+    # --- 6. Scoring Logic ---
+    score = 0
+    if shift_mins >= 45: score += 40 
+    if ramp_ratio > 1.5: score += 30 
+    if p_val < 0.05: score += 30    
+
+    # --- 7. Visualization ---
+    plt.figure(figsize=(12, 6))
+    x_times = [t.strftime('%H:%M') for t in profile_dark.index]
+    
+    plt.plot(x_times, profile_dark.values, label='Dark Day (Grid Only)', color='#2c3e50', lw=2)
+    plt.plot(x_times, profile_norm.values, label='Normal Day (Solar+Battery)', color='#e67e22', lw=2, ls='--')
+    
+    plt.fill_between(x_times, profile_dark.values, profile_norm.values, color='orange', alpha=0.1)
+    
+    plt.title(f"Battery Detection (Temp Match: {avg_temp_dark:.1f}°C)\nScore: {score}/100 | Peak Shift: {shift_mins}m")
+    plt.ylabel('Consumption (kWh)')
+    plt.xticks(x_times[::4], rotation=45)
+    plt.legend()
+    plt.grid(True, alpha=0.2)
+    plt.tight_layout()
+    plt.show()
+
+    return {
+        "score": score,
+        "p_value": p_val,
+        "shift": shift_mins,
+        "temp_matched": avg_temp_dark
+    }
+
+

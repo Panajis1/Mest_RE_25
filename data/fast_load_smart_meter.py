@@ -50,10 +50,9 @@ def process_single_file(file_path: str, valid_ids_set: Set[str], target_meta: pd
 
 
 # Call the function using only the directory path
-# If problems with ram occur, adjust the batch_size=1 when calling the function 
 #Default function filters only for individual housholds named "Particuliers"
 
-#use following code snippet to test the function and get a quick overview of the data. Adjust the batch_size for faster loading if needed.
+#use following code snippet to test the function and get a quick overview of the data. Adjust the batch_size for faster loading if needed and lower if problems with ram occur.
 """
 results_collector = []
 
