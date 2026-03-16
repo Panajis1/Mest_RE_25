@@ -1,3 +1,4 @@
+#%%
 # Import necessary libraries
 import pandas as pd 
 
@@ -36,7 +37,14 @@ def env_data(stations = None):
             print(f"Could not process station {station['name']} with id {station['id']}. Error: {e}")
             continue
     combined_df = pd.concat(dict_all.values())
-    average_df = combined_df.groupby(level=0).mean(numeric_only=True)
-    average_df.index = combined_df['timestamp'].unique()
 
-    return combined_df, average_df
+    
+    average_df = combined_df.groupby('timestamp').mean(numeric_only=True).resample('15min').interpolate()
+    #average_df.index = average_df.index.strftime("%Y-%m-%d %H:%M:%S")
+    average_df.index = average_df.index.tz_convert(None)
+    return average_df
+#%%
+print(env_data().head(10))
+
+
+# %%
