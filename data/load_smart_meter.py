@@ -1,5 +1,4 @@
 """Load Romande Energie smart meter parquet data."""
-
 import glob
 import os
 from typing import Generator, List
