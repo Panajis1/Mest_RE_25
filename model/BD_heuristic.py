@@ -116,7 +116,7 @@ if __name__ == "__main__":
     data_gen = re_data.load_all_data_parallel_generator(data_dir, partner_type="Particuliers", batch_size=2)
 
     results = []
-    MAX_TEST = 12000
+    MAX_TEST = 10
     processed = 0
 
     for batch_df in data_gen:

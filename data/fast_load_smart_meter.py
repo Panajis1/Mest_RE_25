@@ -131,14 +131,14 @@ def load_all_data_parallel_generator(
                 batch_df = pd.concat([res for res in results if not res.empty], ignore_index=True)
                 
                 if not batch_df.empty:
-                    """# --- GROUPED FILTERING LOGIC ---
+                    # --- GROUPED FILTERING LOGIC ---
                     # 1. Calculate sum per ID (Assumes 'LOAD' is in MWh or needs conversion)
                     # 2. Identify IDs where total annual load <= 100 MWh
                     yearly_sums = batch_df.groupby("ID")["CONSO_KWH"].sum()
                     ids_to_keep = yearly_sums[yearly_sums <= 100000].index
                     
                     # 3. Filter the original batch to keep all timestamps for those IDs
-                    batch_df = batch_df[batch_df["ID"].isin(ids_to_keep)]"""
+                    batch_df = batch_df[batch_df["ID"].isin(ids_to_keep)]
 
                     yield batch_df
                 
