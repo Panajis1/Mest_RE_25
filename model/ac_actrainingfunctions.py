@@ -36,7 +36,7 @@ from sklearn.pipeline import Pipeline
 # CONFIG
 # ============================================================
 
-INPUT_FILE = "all_sources_load_with_weather.parquet"
+INPUT_FILE = r"C:\Users\jiniy\Desktop\CS\all_sources_load_with_weather.parquet"
 
 RF_RANDOM_STATE = 42
 

@@ -33,6 +33,8 @@ from ac_actrainingfunctions import (
     extract_tot_features,
 )
 
+import sys
+sys.path.append(r"C:\Users\jiniy\Desktop\CS\Mest_RE_25\data")
 from envdata import env_data
 
 
@@ -40,7 +42,7 @@ from envdata import env_data
 # CONFIG
 # ============================================================
 
-BASE_DIR = Path("C:/Users/jiniy/Desktop/CS")
+BASE_DIR = Path(r"C:\Users\jiniy\Desktop\CS")
 TRAIN_FILE = BASE_DIR / "all_sources_load_with_weather.parquet"
 
 PARQUET_DIR = Path("C:/Users/jiniy/Desktop/CS/ETHZ_ALL")
