@@ -3,9 +3,14 @@ pandas>=2.0,<3
 pyarrow>=11.0,<16   # used by pandas for read_parquet / to_parquet
 numpy>=1.24,<3
 sqlalchemy>=2.0,<3  # used by pandas read_sql_query for SQLite (load_dataport)
+requests>=2.0,<3
+acnportal>=0.3.3    # used to fetch data from ACN API (load_caltech)
 
 # Exploration / plotting
 matplotlib>=3.7,<4
+
+# Progress bars, used in fast load smart meter and potentially in model training scripts
+tqdm>=4.65,<5
 
 # Optional: ipython for notebook-style "Run Cell" and rich display of DataFrames
 ipython>=8.0,<9

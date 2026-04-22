@@ -52,3 +52,5 @@ data/Smartnialmeter_house4_EV.parquet
 
 # Local scripts
 local_scripts/
+analysis_plots/
+
