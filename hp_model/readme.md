@@ -137,21 +137,7 @@ This will:
 
 ---
 
-## Input Data Requirements
 
-Required columns:
-
-* `dt_utc` (timestamp)
-* `value_kw_mean` (power)
-* `temp` (temperature)
-* `glob_rad` (solar irradiation)
-* `id_customer`
-
-Sampling frequency:
-
-* **15 minutes**
-
----
 
 ## Outputs
 
@@ -171,7 +157,7 @@ Sampling frequency:
 
 ## Important Assumptions
 
-* Feature extraction is performed **only at night** (low solar irradiation)
+* Feature extraction for the detection part is performed **only at night** (low solar irradiation)
 * Detection relies on **temperature-load correlation**
 * Disaggregation assumes:
 
@@ -189,30 +175,6 @@ Sampling frequency:
 
 ---
 
-## Recommendations
-
-Avoid committing large files. Add to `.gitignore`:
-
-```
-*.parquet
-*.csv
-*_outputs/
-*_chunks/
-*.log
-```
-
----
-
-## Minimal Workflow
-
-1. Update file paths
-2. Run detection
-3. Select `winter_hp` users
-4. Run disaggregation
-5. Analyze results
-
----
-
 ## Notes
 
 * Scripts are designed for large datasets (chunk-based processing)
@@ -223,7 +185,6 @@ Avoid committing large files. Add to `.gitignore`:
 
 ## Usage Disclaimer
 
-The code is designed for research purposes.
 Users must adapt:
 
 * file paths
