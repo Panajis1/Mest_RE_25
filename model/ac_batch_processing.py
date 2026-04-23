@@ -1,12 +1,10 @@
 """
-AC Detection: Batch Processing
-Mirror of batch_processing.py but for AC (air conditioner) detection.
+AC Detection: Batch Processing (캐시 + Threshold 스캔 버전)
 
-Steps:
-  1. Train AC classifier on all_sources_load_with_weather.parquet (Dataport AC ground truth)
-  2. Download weather for new parquet files
-  3. Discover parquet files in PARQUET_DIR
-  4. For each parquet: merge weather → extract features → predict → save CSV
+변경사항:
+  - modeled_df, inference features, model을 캐시로 저장/로드
+  - threshold 스캔 루프 추가 (매번 전체 파이프라인 재실행 불필요)
+  - FORCE_REBUILD 플래그로 캐시 강제 재생성 가능
 """
 print("Starting AC batch processing...")
 
@@ -14,6 +12,7 @@ from pathlib import Path
 import gc
 import numpy as np
 import pandas as pd
+import joblib
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
@@ -48,9 +47,116 @@ TRAIN_FILE = BASE_DIR / "all_sources_load_with_weather.parquet"
 PARQUET_DIR = Path("C:/Users/jiniy/Desktop/CS/ETHZ_ALL")
 OUTPUT_DIR = PARQUET_DIR / "ac_detection_outputs"
 
+# ── Cache File Paths ──────────────────────────────────────────
+CACHE_DIR = BASE_DIR / "ac_cache"
+MODELED_DF_CACHE    = CACHE_DIR / "modeled_df_cache.parquet"
+MODEL_CACHE         = CACHE_DIR / "ac_model.pkl"
+INFERENCE_FEAT_CACHE = CACHE_DIR / "inference_feats_cache.parquet"
+
+# ── True로 바꾸면 캐시 무시하고 처음부터 재실행 ───────────── 
+FORCE_REBUILD_MODELED   = False   # build_modeled_dataset 재실행
+FORCE_REBUILD_MODEL     = False   # 모델 재학습
+FORCE_REBUILD_INFERENCE = False   # inference feature 재추출
+
+# ── Threshold 스캔 범위 ─────────────────────────────────────
+THRESHOLD_SCAN = [0.65, 0.66, 0.67, 0.68, 0.69, 0.70]  # 범위 좁혀서 재스캔
+#chosen_threshold = 0.65  # 일단 아무 값, 스캔 후 결정
+
 KWH_TO_KW_FACTOR = 4.0
 MAX_ANNUAL_CONSUMPTION_KWH = 10_000.0
 NEW_SOURCE_NAME = "new_parquet"
+
+
+# ============================================================
+# CACHE UTILS
+# ============================================================
+
+def load_or_build_modeled_df(df: pd.DataFrame) -> pd.DataFrame:
+    """modeled_df 캐시 로드 or 빌드 후 저장"""
+    if not FORCE_REBUILD_MODELED and MODELED_DF_CACHE.exists():
+        print(f"\n[CACHE] Loading modeled_df from cache: {MODELED_DF_CACHE}")
+        return pd.read_parquet(MODELED_DF_CACHE)
+
+    print("\n[CACHE] Building modeled_df from scratch...")
+    modeled_df = build_modeled_dataset(df)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    modeled_df.to_parquet(MODELED_DF_CACHE, index=False)
+    print(f"[CACHE] Saved modeled_df → {MODELED_DF_CACHE}")
+    return modeled_df
+
+
+def load_or_fit_model(modeled_df: pd.DataFrame):
+    """모델 캐시 로드 or 학습 후 저장"""
+    if not FORCE_REBUILD_MODEL and MODEL_CACHE.exists():
+        print(f"\n[CACHE] Loading model from cache: {MODEL_CACHE}")
+        return joblib.load(MODEL_CACHE)
+
+    print("\n[CACHE] Training model from scratch...")
+    model = fit_model(modeled_df)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model, MODEL_CACHE)
+    print(f"[CACHE] Saved model → {MODEL_CACHE}")
+    return model
+
+
+def load_or_build_inference_feats(weather_df: pd.DataFrame) -> pd.DataFrame:
+    """inference feature 캐시 로드 or 추출 후 저장"""
+    if not FORCE_REBUILD_INFERENCE and INFERENCE_FEAT_CACHE.exists():
+        print(f"\n[CACHE] Loading inference features from cache: {INFERENCE_FEAT_CACHE}")
+        return pd.read_parquet(INFERENCE_FEAT_CACHE)
+
+    print("\n[CACHE] Extracting inference features from scratch...")
+    parquet_files = list_input_parquet_files()
+    all_feats = []
+    for parquet_file in parquet_files:
+        df_new_tot = load_new_parquet_with_weather(parquet_file, weather_df)
+        feats_df = build_inference_features(df_new_tot)
+        feats_df["source_file"] = parquet_file.stem
+        all_feats.append(feats_df)
+        del df_new_tot
+        gc.collect()
+
+    combined = pd.concat(all_feats, ignore_index=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    combined.to_parquet(INFERENCE_FEAT_CACHE, index=False)
+    print(f"[CACHE] Saved inference features → {INFERENCE_FEAT_CACHE}")
+    return combined
+
+
+# ============================================================
+# THRESHOLD SCAN
+# ============================================================
+
+def scan_thresholds(model, feats_df: pd.DataFrame):
+    """
+    prob_has_ac를 먼저 계산해두고,
+    threshold만 바꿔가며 AC 비율를 빠르게 확인
+    """
+    print("\n========== THRESHOLD SCAN ==========")
+
+    X = feats_df[FEATURE_COLS].copy()
+    proba = model.predict_proba(X)
+    classes = model.named_steps["rf"].classes_
+
+    if 1 in classes:
+        idx = int(np.where(classes == 1)[0][0])
+        prob_has_ac = proba[:, idx]
+    else:
+        prob_has_ac = np.zeros(len(feats_df))
+
+    feats_df = feats_df.copy()
+    feats_df["prob_has_ac"] = prob_has_ac
+
+    print(f"\n{'Threshold':>10} | {'AC users':>10} | {'Total':>10} | {'AC ratio':>10}")
+    print("-" * 48)
+    for threshold in THRESHOLD_SCAN:
+        n_ac = int((prob_has_ac >= threshold).sum())
+        total = len(prob_has_ac)
+        ratio = n_ac / total * 100
+        marker = " ←" if abs(ratio - 10.0) < 3.0 else ""   # 10% 근처 표시
+        print(f"{threshold:>10.2f} | {n_ac:>10,} | {total:>10,} | {ratio:>9.1f}%{marker}")
+
+    return feats_df  # prob_has_ac 컬럼 포함
 
 
 # ============================================================
@@ -70,8 +176,6 @@ def load_old_training_df() -> pd.DataFrame:
         raise ValueError(f"Required columns missing: {missing}")
 
     df = df[needed_cols].copy()
-
-    # Keep AC rows (for labels) and TOT rows (for features)
     df = df[df["type"].isin(["AC", "TOT"])].copy()
 
     df["dt_utc"] = pd.to_datetime(df["dt_utc"], utc=True, errors="coerce")
@@ -79,15 +183,7 @@ def load_old_training_df() -> pd.DataFrame:
     df = convert_f_to_c_if_needed(df, threshold_f=TEMP_F_THRESHOLD)
     df = df.sort_values(["id_customer", "type", "dt_utc"]).reset_index(drop=True)
 
-    modeled_df = build_modeled_dataset(df)
-
-    if modeled_df.empty:
-        raise ValueError("The modeled training dataset is empty.")
-
-    print("\n[TRAIN] Class distribution:")
-    print(modeled_df["target_name"].value_counts(dropna=False).to_string())
-
-    return modeled_df
+    return df   # raw df 반환 (modeled_df 빌드는 load_or_build_modeled_df에서)
 
 
 def fit_model(modeled_df: pd.DataFrame):
@@ -116,7 +212,7 @@ def fit_model(modeled_df: pd.DataFrame):
 
 
 # ============================================================
-# WEATHER  (identical to HP batch)
+# WEATHER
 # ============================================================
 
 def load_weather_df() -> pd.DataFrame:
@@ -153,9 +249,6 @@ def load_weather_df() -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
-    print(f"[WEATHER] Original rows: {len(weather)}")
-
-    # Resample to 15 minutes via time interpolation
     weather_15 = (
         weather.set_index("dt_utc")[["temp", "glob_rad"]]
         .resample("15min")
@@ -196,7 +289,6 @@ def load_new_parquet_with_weather(parquet_file: Path, weather_df: pd.DataFrame) 
     df_new["CONSO_KWH"] = pd.to_numeric(df_new["CONSO_KWH"], errors="coerce")
     df_new = df_new.dropna(subset=["ID", "DT_UTC", "CONSO_KWH"]).copy()
 
-    # Filter by annual consumption
     annual_kwh = (
         df_new.groupby("ID", dropna=False)["CONSO_KWH"]
         .sum(min_count=1)
@@ -206,11 +298,6 @@ def load_new_parquet_with_weather(parquet_file: Path, weather_df: pd.DataFrame) 
     valid_ids = set(
         annual_kwh.loc[annual_kwh["annual_consumption_kwh"] <= MAX_ANNUAL_CONSUMPTION_KWH, "ID"].astype(str)
     )
-    total_users = df_new["ID"].nunique()
-    print(f"\n[NEW] Total users: {total_users}")
-    print(f"[NEW] Kept (≤10 MWh/year): {len(valid_ids)}")
-    print(f"[NEW] Discarded (>10 MWh/year): {total_users - len(valid_ids)}")
-
     df_new = df_new[df_new["ID"].isin(valid_ids)].copy()
     if df_new.empty:
         raise ValueError("No users remain after annual consumption filter.")
@@ -220,7 +307,6 @@ def load_new_parquet_with_weather(parquet_file: Path, weather_df: pd.DataFrame) 
     df_new["type"] = "TOT"
     df_new["source"] = NEW_SOURCE_NAME
 
-    # Exact merge with 15-min weather
     df_new = df_new.sort_values("dt_utc").reset_index(drop=True)
     weather_df = weather_df.sort_values("dt_utc").reset_index(drop=True)
     df_new = df_new.merge(weather_df, on="dt_utc", how="left")
@@ -229,11 +315,6 @@ def load_new_parquet_with_weather(parquet_file: Path, weather_df: pd.DataFrame) 
     df_new = df_new[final_cols].copy()
     for col in ["glob_rad", "temp", "value_kw_mean"]:
         df_new[col] = pd.to_numeric(df_new[col], errors="coerce")
-
-    print(f"\n[NEW] Shape after weather merge: {df_new.shape}")
-    print(f"[NEW] Valid temp values: {df_new['temp'].notna().sum()}")
-    print(f"[NEW] Valid glob_rad values: {df_new['glob_rad'].notna().sum()}")
-    print(f"[NEW] Rows without matched weather: {df_new['temp'].isna().sum()}")
 
     return df_new
 
@@ -268,15 +349,6 @@ def build_inference_features(df_new_tot: pd.DataFrame) -> pd.DataFrame:
     feats_df = pd.DataFrame(records)
     print(f"\n[NEW] Valid users for inference: {len(feats_df)}")
 
-    if not feats_df.empty and "used_daytime_only" in feats_df.columns:
-        print("[NEW] Feature mode summary:")
-        print(
-            feats_df["used_daytime_only"]
-            .value_counts(dropna=False)
-            .rename(index={1: "daytime_only", 0: "full_curve_fallback"})
-            .to_string()
-        )
-
     if discard_reasons:
         print("[NEW] Discard reasons:")
         for k, v in sorted(discard_reasons.items(), key=lambda x: (-x[1], x[0])):
@@ -289,23 +361,18 @@ def build_inference_features(df_new_tot: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# PREDICTION
+# PREDICTION (선택한 threshold로 최종 예측)
 # ============================================================
 
-def predict_users(model, feats_df: pd.DataFrame) -> pd.DataFrame:
+def predict_users(model, feats_df: pd.DataFrame, threshold: float = AC_PROB_THRESHOLD) -> pd.DataFrame:
     X_new = feats_df[FEATURE_COLS].copy()
 
-    pred = model.predict(X_new)
     proba = model.predict_proba(X_new)
     classes = model.named_steps["rf"].classes_
 
-    extra_cols = [c for c in ["used_daytime_only", "n_day_rows", "n_feature_rows"] if c in feats_df.columns]
+    extra_cols = [c for c in ["used_daytime_only", "n_day_rows", "n_feature_rows", "source_file"] if c in feats_df.columns]
     out = feats_df[["id_customer", "source"] + extra_cols + FEATURE_COLS].copy()
-    out["pred_target"] = pred
-    out["pred_target_name"] = out["pred_target"].map(INT_TO_LABEL)
 
-    # 임계값 적용: prob_has_ac > AC_PROB_THRESHOLD 일 때만 has_ac
-    # (기본 0.5보다 높게 설정해 false positive 줄임)
     for class_id, class_name in INT_TO_LABEL.items():
         col_name = f"prob_{class_name}"
         if class_id in classes:
@@ -314,7 +381,7 @@ def predict_users(model, feats_df: pd.DataFrame) -> pd.DataFrame:
         else:
             out[col_name] = 0.0
 
-    out["pred_has_ac"] = (out["prob_has_ac"] >= AC_PROB_THRESHOLD).astype(int)
+    out["pred_has_ac"] = (out["prob_has_ac"] >= threshold).astype(int)
     out["pred_target_name"] = out["pred_has_ac"].map({1: "has_ac", 0: "no_ac"})
 
     return out.sort_values(
@@ -327,133 +394,16 @@ def predict_users(model, feats_df: pd.DataFrame) -> pd.DataFrame:
 # SAVE OUTPUT
 # ============================================================
 
-def save_prediction_csv(pred_df: pd.DataFrame, parquet_file: Path) -> Path:
+def save_prediction_csv(pred_df: pd.DataFrame, threshold: float) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_file = OUTPUT_DIR / f"{parquet_file.stem}_ac_labels.csv"
-    # prob_has_ac도 같이 저장 (시각화용)
-    cols = ["id_customer", "pred_target_name"]
-    if "prob_has_ac" in pred_df.columns:
-        cols.append("prob_has_ac")
+    output_file = OUTPUT_DIR / f"ac_labels_all_thresh{int(threshold*100)}.csv"
+    cols = ["id_customer", "pred_target_name", "prob_has_ac"]
+    if "source_file" in pred_df.columns:
+        cols = ["id_customer", "source_file", "pred_target_name", "prob_has_ac"]
     export_df = pred_df[cols].rename(columns={"pred_target_name": "label"})
     export_df.to_csv(output_file, index=False)
     print(f"\n[OUTPUT] CSV saved to: {output_file}")
     return output_file
-
-
-# ============================================================
-# PROCESS ONE PARQUET
-# ============================================================
-
-def process_single_parquet(model, weather_df: pd.DataFrame, parquet_file: Path) -> Path:
-    print("\n============================================================")
-    print(f"Processing: {parquet_file.name}")
-    print("============================================================")
-
-    df_new_tot = load_new_parquet_with_weather(parquet_file, weather_df)
-
-    print("\n========== STEP 4: FEATURE EXTRACTION ==========")
-    feats_df = build_inference_features(df_new_tot)
-
-    print("\n========== STEP 5: PREDICTION ==========")
-    pred_df = predict_users(model, feats_df)
-
-    print("\nPrediction distribution:")
-    print(pred_df["pred_target_name"].value_counts(dropna=False).to_string())
-
-    ac_pred = pred_df[pred_df["pred_has_ac"] == 1].copy()
-    print(f"\nUsers predicted as AC: {len(ac_pred)}")
-    if not ac_pred.empty:
-        extra_cols = [c for c in ["used_daytime_only", "n_day_rows", "n_feature_rows"] if c in ac_pred.columns]
-        print(ac_pred[["id_customer"] + extra_cols + ["pred_target_name", "prob_has_ac"]].head(20).to_string(index=False))
-
-    output_file = save_prediction_csv(pred_df, parquet_file)
-
-    del df_new_tot, feats_df, pred_df, ac_pred
-    gc.collect()
-
-    return output_file
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-    print("\n========== STEP 1: TRAIN AC MODEL ==========")
-    modeled_df = load_old_training_df()
-
-    # ── Hold-out 검증 (성능 확인) ──────────────────────────
-    print("\n---------- [1a] Hold-out validation ----------")
-    import time as _time
-    split_seed = int(_time.time_ns() % (2**32 - 1))
-    train_df, test_df = make_holdout_split(modeled_df, split_seed=split_seed)
-    _, result_df, _ = train_and_evaluate_holdout(train_df, test_df)
-    print("\n[Hold-out] Validation complete. Now training on full dataset...")
-
-    # ── 전체 데이터로 재학습 (RE 추론용) ───────────────────
-    print("\n---------- [1b] Full training ----------")
-    model = fit_model(modeled_df)
-    del modeled_df, train_df, test_df, result_df
-    gc.collect()
-
-    print("\n========== STEP 2: WEATHER ==========")
-    weather_df = load_weather_df()
-
-    print("\n========== STEP 3: PARQUET FILE DISCOVERY ==========")
-    parquet_files = list_input_parquet_files()
-    print(f"Found {len(parquet_files)} parquet files.")
-    print(f"Output directory: {OUTPUT_DIR}")
-
-    saved_files = []
-    failed_files = []
-
-    for i, parquet_file in enumerate(parquet_files, start=1):
-        print(f"\n[{i}/{len(parquet_files)}] Starting {parquet_file.name}")
-        try:
-            output_file = process_single_parquet(model, weather_df, parquet_file)
-            saved_files.append(output_file)
-        except Exception as exc:
-            failed_files.append((parquet_file.name, str(exc)))
-            print(f"\n[ERROR] Failed on {parquet_file.name}: {exc}")
-        finally:
-            gc.collect()
-
-    print("\n============================================================")
-    print("FINAL SUMMARY")
-    print("============================================================")
-    print(f"Successfully processed: {len(saved_files)}")
-    print(f"Failed: {len(failed_files)}")
-
-    if saved_files:
-        print("\nSaved CSV files:")
-        for p in saved_files:
-            print(f"  - {p}")
-
-        # 모든 CSV를 하나로 합치기
-        print("\n========== MERGING ALL CSVs ==========")
-        merged_parts = []
-        for p in saved_files:
-            part = pd.read_csv(p)
-            part["source_file"] = p.stem
-            merged_parts.append(part)
-
-        merged_df = pd.concat(merged_parts, ignore_index=True)
-        merged_path = OUTPUT_DIR / "ac_labels_all.csv"
-        merged_df.to_csv(merged_path, index=False)
-        print(f"Merged CSV saved to: {merged_path}")
-        print(f"Total users in merged file: {len(merged_df)}")
-        print("\nLabel distribution:")
-        print(merged_df["label"].value_counts().to_string())
-
-        print("\n========== VISUALISATION ==========")
-        plot_ac_results(merged_df, OUTPUT_DIR, model=model)
-
-    if failed_files:
-        print("\nFiles with errors:")
-        for name, err in failed_files:
-            print(f"  - {name}: {err}")
-
-
 
 
 # ============================================================
@@ -466,24 +416,19 @@ def plot_ac_results(merged_df: pd.DataFrame, output_dir: Path, model=None) -> No
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 공통 스타일 ──────────────────────────────────────────
     COLORS = {"has_ac": "#E8634A", "no_ac": "#4A90D9"}
     plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False})
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     fig.suptitle("AC Detection Results — RE Dataset", fontsize=15, fontweight="bold", y=1.02)
 
-    # ── 1. 파이 차트: has_ac / no_ac 전체 비율 ───────────────
     ax1 = axes[0]
     counts = merged_df["label"].value_counts()
     labels = counts.index.tolist()
     colors = [COLORS.get(l, "#aaa") for l in labels]
     wedges, texts, autotexts = ax1.pie(
-        counts.values,
-        labels=labels,
-        colors=colors,
-        autopct="%1.1f%%",
-        startangle=90,
+        counts.values, labels=labels, colors=colors,
+        autopct="%1.1f%%", startangle=90,
         wedgeprops={"edgecolor": "white", "linewidth": 2},
     )
     for at in autotexts:
@@ -491,18 +436,13 @@ def plot_ac_results(merged_df: pd.DataFrame, output_dir: Path, model=None) -> No
         at.set_fontweight("bold")
     ax1.set_title(f"Overall AC ratio\n(n={len(merged_df):,} users)", fontsize=12)
 
-    # ── 2. 히스토그램: prob_has_ac 분포 ─────────────────────
     ax2 = axes[1]
     if "prob_has_ac" in merged_df.columns:
         for label, grp in merged_df.groupby("label"):
             ax2.hist(
-                grp["prob_has_ac"].dropna(),
-                bins=30,
-                alpha=0.65,
-                color=COLORS.get(label, "#aaa"),
-                label=label,
-                edgecolor="white",
-                linewidth=0.5,
+                grp["prob_has_ac"].dropna(), bins=30, alpha=0.65,
+                color=COLORS.get(label, "#aaa"), label=label,
+                edgecolor="white", linewidth=0.5,
             )
         ax2.set_xlabel("prob_has_ac")
         ax2.set_ylabel("Number of users")
@@ -511,36 +451,89 @@ def plot_ac_results(merged_df: pd.DataFrame, output_dir: Path, model=None) -> No
         ax2.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
     else:
         ax2.text(0.5, 0.5, "prob_has_ac column\nnot found", ha="center", va="center")
-        ax2.set_title("AC probability distribution")
 
-    # ── 3. 피처 중요도 ──────────────────────────────────────
     ax3 = axes[2]
     if model is not None:
         rf_model = model.named_steps["rf"]
         importances = pd.Series(
             rf_model.feature_importances_, index=FEATURE_COLS
         ).sort_values(ascending=True)
-        bars = ax3.barh(
-            importances.index,
-            importances.values,
-            color="#4A90D9",
-            edgecolor="white",
-            linewidth=0.8,
-        )
+        bars = ax3.barh(importances.index, importances.values, color="#4A90D9", edgecolor="white", linewidth=0.8)
         ax3.set_xlabel("Importance")
         ax3.set_title("Feature importances (RandomForest)")
         for bar, val in zip(bars, importances.values):
-            ax3.text(val + 0.002, bar.get_y() + bar.get_height() / 2,
-                     f"{val:.3f}", va="center", fontsize=9)
-    else:
-        ax3.text(0.5, 0.5, "model not provided", ha="center", va="center")
-        ax3.set_title("Feature importances")
+            ax3.text(val + 0.002, bar.get_y() + bar.get_height() / 2, f"{val:.3f}", va="center", fontsize=9)
 
     plt.tight_layout()
     plot_path = output_dir / "ac_detection_results.png"
     fig.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"\n[PLOT] Saved to: {plot_path}")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    import time as _time
+    total_start = _time.perf_counter()
+
+    # ── STEP 1: modeled_df (캐시 우선) ──────────────────────
+    print("\n========== STEP 1: MODELED DATASET ==========")
+    raw_df = load_old_training_df()
+    modeled_df = load_or_build_modeled_df(raw_df)
+    del raw_df
+    gc.collect()
+
+    print("\n[TRAIN] Class distribution:")
+    print(modeled_df["target_name"].value_counts(dropna=False).to_string())
+
+    # ── STEP 1a: Hold-out 검증 ──────────────────────────────
+    print("\n---------- [1a] Hold-out validation ----------")
+    split_seed = int(_time.time_ns() % (2**32 - 1))
+    train_df, test_df = make_holdout_split(modeled_df, split_seed=split_seed)
+    _, result_df, _ = train_and_evaluate_holdout(train_df, test_df)
+    del train_df, test_df, result_df
+    gc.collect()
+
+    # ── STEP 1b: 전체 데이터로 모델 학습 (캐시 우선) ────────
+    print("\n---------- [1b] Full model (cache) ----------")
+    model = load_or_fit_model(modeled_df)
+    del modeled_df
+    gc.collect()
+
+    # ── STEP 2: Weather ─────────────────────────────────────
+    print("\n========== STEP 2: WEATHER ==========")
+    weather_df = load_weather_df()
+
+    # ── STEP 3: Inference features (캐시 우선) ───────────────
+    print("\n========== STEP 3: INFERENCE FEATURES ==========")
+    feats_df = load_or_build_inference_feats(weather_df)
+    del weather_df
+    gc.collect()
+
+    # ── STEP 4: Threshold 스캔 ───────────────────────────────
+    feats_df = scan_thresholds(model, feats_df)
+
+    # ── STEP 5: 최종 threshold로 예측 & 저장 ─────────────────
+    print("\n========== STEP 5: FINAL PREDICTION ==========")
+    chosen_threshold =  0.66 #AC_PROB_THRESHOLD   # ← change this based on scan results
+    print(f"Using threshold: {chosen_threshold}")
+
+    pred_df = predict_users(model, feats_df, threshold=chosen_threshold)
+
+    print("\nPrediction distribution:")
+    print(pred_df["pred_target_name"].value_counts(dropna=False).to_string())
+
+    output_file = save_prediction_csv(pred_df, threshold=chosen_threshold)
+    plot_ac_results(pred_df.rename(columns={"pred_target_name": "label"}), OUTPUT_DIR, model=model)
+
+    elapsed = _time.perf_counter() - total_start
+    m, s = divmod(int(elapsed), 60)
+    h, m = divmod(m, 60)
+    print(f"\nTotal runtime: {h:02d}:{m:02d}:{s:02d}")
+
 
 if __name__ == "__main__":
     main()

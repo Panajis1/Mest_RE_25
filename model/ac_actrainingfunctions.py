@@ -42,7 +42,7 @@ RF_RANDOM_STATE = 42
 
 TEMP_F_THRESHOLD = 55.0          # same as HP: convert F→C if max temp > this
 
-CORR_THRESHOLD = 0.20            # minimum |corr| to call it meaningful
+CORR_THRESHOLD = 0.20            # minimum |corr| to call it meaningful 
 TEMP_HOT = 25.0                  # °C — "hot" threshold for AC signal
 TEMP_COLD = 10.0                 # °C — cold baseline (AC should be near zero)
 MIN_SAMPLES_CORR = 10
