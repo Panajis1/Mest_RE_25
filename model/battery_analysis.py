@@ -1,235 +1,483 @@
-import os
-import sys
-import torch
-import torch.nn as nn
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import gc
-import joblib
-import warnings
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
-from torch.utils.data import DataLoader, Dataset
-from sklearn.preprocessing import MinMaxScaler
 
-# --- SUPPRESS WARNINGS ---
-warnings.filterwarnings("ignore", category=UserWarning)
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
-# --- CONFIGURATION ---
-FORCE_RETRAIN = False  
-THRESHOLD_PERCENTILE = 60  # Lower = more sensitive to potential batteries
-MODEL_PATH = "power_autoencoder.pth"
-SCALER_PATH = "data_scaler.pkl"
-META_PATH = "model_metadata.joblib"
-DIR = r"C:\Users\Aline\Documents\Studium\Case Study\processed_data"
-WEATHER_CACHE_PATH = os.path.join(DIR, 'prepared_weather.parquet')
 
-# 1. Environment Pathing
-_repo_root = Path(__file__).resolve().parent.parent
-if str(_repo_root) not in sys.path:
-    sys.path.insert(0, str(_repo_root))
+ID_CANDIDATES = ("ID", "customer_id", "id_customer", "id")
+PROB_CANDIDATES = ("battery_prob", "battery_probability")
+STATUS_CANDIDATES = ("status",)
+CAPACITY_CANDIDATES = ("estimated_battery_capacity_kwh", "capacity_kwh")
+PV_FLAG_CANDIDATES = ("is_pv_customer",)
+PV_PROB_CANDIDATES = ("has_pv_prob",)
+PV_CAP_CANDIDATES = ("pv_capacity_kwp", "pv_capacity_ci_upper", "pv_capacity_kwp_floor")
+COLOR_BLACK = "#111111"
+COLOR_RED = "#C62828"
 
-import data.envdata as meteo
-import data.fast_load_smart_meter as re_data
 
-# --- 1. MODEL ARCHITECTURE ---
-class PowerAutoencoder(nn.Module):
-    def __init__(self, feature_dim=3, hidden_dim=64):
-        super(PowerAutoencoder, self).__init__()
-        self.gcn = nn.Linear(feature_dim, hidden_dim) 
-        self.encoder_lstm = nn.LSTM(hidden_dim, hidden_dim // 2, batch_first=True, bidirectional=True)
-        self.decoder_lstm = nn.LSTM(hidden_dim, hidden_dim // 2, batch_first=True, bidirectional=True)
-        self.output_layer = nn.Linear(hidden_dim, feature_dim)
+def _pick_column(columns, candidates):
+    by_lower = {col.lower(): col for col in columns}
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+        found = by_lower.get(candidate.lower())
+        if found is not None:
+            return found
+    return None
 
-    def forward(self, x):
-        x = torch.relu(self.gcn(x))
-        _, (h_n, _) = self.encoder_lstm(x)
-        encoded = torch.cat((h_n[-2,:,:], h_n[-1,:,:]), dim=1)
-        decoded_input = encoded.unsqueeze(1).repeat(1, x.size(1), 1)
-        reconstructed, _ = self.decoder_lstm(decoded_input)
-        return self.output_layer(reconstructed)
 
-# --- 2. DATASET CLASS (For Training) ---
-class SmartMeterDataset(Dataset):
-    def __init__(self, data, seq_length=96):
-        self.sequences = []
-        data = data.copy()
-        data['date_only'] = pd.to_datetime(data['dt_local']).dt.date
-        id_col = 'id_customer' if 'id_customer' in data.columns else 'ID'
-        
-        grouped = data.groupby([id_col, 'date_only'])
-        for _, group in grouped:
-            if len(group) == seq_length:
-                group = group.sort_values('dt_local')
-                feats = group[['value_kw_mean', 'glob_rad', 'temp']].values
-                self.sequences.append(torch.FloatTensor(feats))
-                
-    def __len__(self): return len(self.sequences)
-    def __getitem__(self, idx): return self.sequences[idx]
+def _normalize_probability_to_pct(df: pd.DataFrame, prob_col: str) -> pd.Series:
+    prob_raw = pd.to_numeric(df[prob_col], errors="coerce").fillna(0.0)
+    if prob_raw.max() <= 1.0:
+        return (prob_raw * 100.0).clip(0.0, 100.0)
+    return prob_raw.clip(0.0, 100.0)
 
-# --- 3. HELPERS ---
-def save_assets(model, scaler, threshold):
-    torch.save(model.state_dict(), MODEL_PATH)
-    joblib.dump(scaler, SCALER_PATH)
-    joblib.dump({'threshold': threshold, 'percentile': THRESHOLD_PERCENTILE}, META_PATH)
 
-def load_assets():
-    if not os.path.exists(MODEL_PATH) or FORCE_RETRAIN:
-        return None, None, None
-    model = PowerAutoencoder(3, 64)
-    model.load_state_dict(torch.load(MODEL_PATH))
-    scaler = joblib.load(SCALER_PATH)
-    meta = joblib.load(META_PATH)
-    return model, scaler, meta['threshold']
+def _infer_is_pv_customer(df: pd.DataFrame) -> pd.Series:
+    pv_flag_col = _pick_column(df.columns, PV_FLAG_CANDIDATES)
+    if pv_flag_col is not None:
+        raw = df[pv_flag_col].astype(str).str.strip().str.lower()
+        return raw.isin(("yes", "true", "1"))
 
-def prepare_weather(df):
-    mapping = {'t_2m_C': 'temp', 'global_rad_W': 'glob_rad'}
-    df = df.rename(columns=mapping)
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    return df[['temp', 'glob_rad']]
+    pv_prob_col = _pick_column(df.columns, PV_PROB_CANDIDATES)
+    if pv_prob_col is not None:
+        pv_prob = pd.to_numeric(df[pv_prob_col], errors="coerce")
+        return pv_prob.fillna(0.0) >= 0.5
 
-# --- 4. TRAINING & CALIBRATION ---
-def train_and_calibrate(df_train, percentile=75):
-    df_train['dt_local'] = pd.to_datetime(df_train['dt_local']).dt.tz_localize(None)
-    
-    # Filter for Baseline (TOT)
-    type_col = 'type' if 'type' in df_train.columns else 'type_measurement'
-    df_baseline = df_train[df_train[type_col].str.upper() == 'TOT'].copy() if type_col in df_train.columns else df_train.copy()
-    if 'CONSO_KWH' in df_baseline.columns:
-        df_baseline = df_baseline.rename(columns={'CONSO_KWH': 'value_kw_mean'})
+    pv_cap_col = _pick_column(df.columns, PV_CAP_CANDIDATES)
+    if pv_cap_col is not None:
+        pv_cap = pd.to_numeric(df[pv_cap_col], errors="coerce")
+        return pv_cap.fillna(0.0) > 0.0
 
-    scaler = MinMaxScaler()
-    cols = ['value_kw_mean', 'glob_rad', 'temp']
-    df_baseline[cols] = scaler.fit_transform(df_baseline[cols])
-    
-    loader = DataLoader(SmartMeterDataset(df_baseline), batch_size=32, shuffle=True)
-    model = PowerAutoencoder(3, 64)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.MSELoss()
-    
-    print(f"Training on {len(loader.dataset)} days...")
-    model.train()
-    for epoch in range(10):
-        for batch in loader:
-            optimizer.zero_grad()
-            loss = criterion(model(batch), batch)
-            loss.backward()
-            optimizer.step()
-    
-    model.eval()
-    errors = []
-    with torch.no_grad():
-        for batch in loader:
-            recon = model(batch)
-            mse = torch.mean((recon[:, :, 0] - batch[:, :, 0]) ** 2, dim=1)
-            errors.extend(mse.tolist())
-    
-    return model, scaler, np.nanpercentile(errors, percentile)
+    return pd.Series(False, index=df.index)
 
-# --- 5. PLOTTING ---
-def plot_battery_results(results_list, threshold):
-    if not results_list: return
-    df = pd.DataFrame(results_list)
-    df['anomaly_score'] = df['MSE'] / threshold
-    
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    suspect_count = df['ID'].nunique()
-    total_users = 12034 
-    
-    axes[0].pie([suspect_count, total_users - suspect_count], labels=['Suspect', 'Normal'], 
-                autopct='%1.1f%%', colors=['#E15759', '#4A90E2'], startangle=90)
-    axes[0].set_title("Detection Ratio")
 
-    sns.histplot(data=df, x='anomaly_score', bins=30, ax=axes[1], color='#E15759', kde=True)
-    axes[1].axvline(1.0, color='black', linestyle='--')
-    axes[1].set_title("Anomaly Score Distribution")
-    plt.show()
+def _compute_reliability_flag(
+    df: pd.DataFrame,
+    status_col: str | None,
+    threshold_pct: float,
+    reliability_margin_pct: float,
+) -> pd.Series:
+    prob_margin = (df["battery_prob_pct"] - threshold_pct).abs()
+    if status_col is None:
+        status_ok = pd.Series(True, index=df.index)
+    else:
+        status_text = df[status_col].fillna("unknown").astype(str).str.strip().str.lower()
+        status_ok = status_text.str.startswith("success") | status_text.eq("ok")
 
-# --- 6. MAIN EXECUTION ---
+    # A result is considered reliable when status is successful and the score
+    # is sufficiently far from the decision threshold.
+    reliable = status_ok & (prob_margin >= reliability_margin_pct)
+    return reliable.astype(bool)
+
+
+def _load_and_prepare(
+    input_csv: Path,
+    threshold_pct: float,
+    reliability_margin_pct: float,
+) -> tuple[pd.DataFrame, str | None]:
+    if not input_csv.exists():
+        raise FileNotFoundError(f"Input file not found: {input_csv}")
+
+    df = pd.read_csv(input_csv)
+    if df.empty:
+        raise ValueError(f"Input file has no rows: {input_csv}")
+
+    id_col = _pick_column(df.columns, ID_CANDIDATES)
+    if id_col is not None:
+        df[id_col] = df[id_col].astype(str)
+
+    prob_col = _pick_column(df.columns, PROB_CANDIDATES)
+    if prob_col is None:
+        raise ValueError(
+            "No battery probability column found. Expected one of: "
+            f"{', '.join(PROB_CANDIDATES)}"
+        )
+
+    df["battery_prob_pct"] = _normalize_probability_to_pct(df, prob_col)
+    df["detected_battery"] = df["battery_prob_pct"] >= threshold_pct
+    df["is_pv_customer_bool"] = _infer_is_pv_customer(df)
+
+    if id_col is not None:
+        df = (
+            df.sort_values("battery_prob_pct", ascending=False)
+            .drop_duplicates(subset=id_col, keep="first")
+            .reset_index(drop=True)
+        )
+
+    status_col = _pick_column(df.columns, STATUS_CANDIDATES)
+    df["is_reliable_detection"] = _compute_reliability_flag(
+        df=df,
+        status_col=status_col,
+        threshold_pct=threshold_pct,
+        reliability_margin_pct=reliability_margin_pct,
+    )
+    return df, status_col
+
+
+def _plot_pie_detected_share(df: pd.DataFrame, output_dir: Path, threshold_pct: float):
+    pv_df = df[df["is_pv_customer_bool"]]
+    total_pv_count = int(len(pv_df))
+    detected_count = int(pv_df["detected_battery"].sum())
+    non_detected_count = total_pv_count - detected_count
+
+    if total_pv_count == 0:
+        return
+
+    plt.figure(figsize=(6.5, 6.5))
+    plt.pie(
+        [non_detected_count, detected_count],
+        labels=["PV customers without detected battery", "PV customers with detected battery"],
+        colors=[COLOR_BLACK, COLOR_RED],
+        autopct="%1.1f%%",
+        startangle=90,
+        wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+    )
+    plt.title(
+        f"Detected battery share among PV customers\n"
+        f"(threshold = {threshold_pct:.1f}%, n_pv = {total_pv_count})"
+    )
+    plt.tight_layout()
+    plt.savefig(output_dir / "battery_detected_share_pie.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_probability_distribution(df: pd.DataFrame, output_dir: Path, threshold_pct: float):
+    detected = df.loc[df["detected_battery"], "battery_prob_pct"]
+    not_detected = df.loc[~df["detected_battery"], "battery_prob_pct"]
+    bins = np.arange(0, 101, 2)
+    total_count = max(len(df), 1)
+
+    count_no, edges = np.histogram(not_detected, bins=bins)
+    count_yes, _ = np.histogram(detected, bins=bins)
+    centers = (edges[:-1] + edges[1:]) / 2
+    widths = np.diff(edges)
+
+    plt.figure(figsize=(11, 5))
+    plt.bar(
+        centers,
+        count_no / total_count,
+        width=widths,
+        color=COLOR_BLACK,
+        label="No battery detected",
+    )
+    plt.bar(
+        centers,
+        count_yes / total_count,
+        width=widths,
+        bottom=count_no / total_count,
+        color=COLOR_RED,
+        label="Battery detected",
+    )
+    plt.axvline(threshold_pct, color=COLOR_BLACK, linestyle="--", linewidth=1.2, label="Threshold")
+    plt.title("Battery probability distribution")
+    plt.xlabel("Battery probability (%)")
+    plt.ylabel("Share of customers")
+    plt.legend()
+    plt.grid(axis="y", linestyle="--", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(output_dir / "battery_probability_distribution.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_status_breakdown(df: pd.DataFrame, output_dir: Path, status_col: str | None):
+    if status_col is None:
+        return
+
+    status_counts = df[status_col].fillna("Unknown").astype(str).value_counts().head(12)
+    if status_counts.empty:
+        return
+
+    plt.figure(figsize=(11, 5))
+    colors = [COLOR_BLACK if i % 2 == 0 else COLOR_RED for i in range(len(status_counts))]
+    plt.bar(status_counts.index, status_counts.values, color=colors)
+    plt.title("Detection status breakdown")
+    plt.xlabel("Status")
+    plt.ylabel("Customers")
+    plt.xticks(rotation=35, ha="right")
+    plt.grid(axis="y", linestyle="--", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(output_dir / "battery_detection_status_breakdown.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_capacity_distribution(df: pd.DataFrame, output_dir: Path):
+    capacity_col = _pick_column(df.columns, CAPACITY_CANDIDATES)
+    if capacity_col is None:
+        return
+
+    detected_capacity = pd.to_numeric(
+        df.loc[df["detected_battery"], capacity_col],
+        errors="coerce",
+    ).dropna()
+    if detected_capacity.empty:
+        return
+
+    plt.figure(figsize=(10, 5))
+    bins = max(10, min(40, int(np.sqrt(len(detected_capacity)) * 3)))
+    plt.hist(detected_capacity, bins=bins, color=COLOR_RED, edgecolor=COLOR_BLACK)
+    plt.title("Estimated battery capacity among detected battery customers")
+    plt.xlabel("Estimated battery capacity (kWh)")
+    plt.ylabel("Customers")
+    plt.grid(axis="y", linestyle="--", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(output_dir / "battery_capacity_detected_histogram.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_pv_split_among_detected(df: pd.DataFrame, output_dir: Path):
+    detected = df[df["detected_battery"]]
+    if detected.empty:
+        return
+
+    pv_detected = int(detected["is_pv_customer_bool"].sum())
+    non_pv_detected = int(len(detected) - pv_detected)
+
+    plt.figure(figsize=(6.5, 6.5))
+    plt.pie(
+        [non_pv_detected, pv_detected],
+        labels=["Detected battery, no PV flag", "Detected battery + PV flag"],
+        colors=[COLOR_BLACK, COLOR_RED],
+        autopct="%1.1f%%",
+        startangle=90,
+        wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+    )
+    plt.title(f"PV split among detected battery customers\n(n = {len(detected)})")
+    plt.tight_layout()
+    plt.savefig(output_dir / "battery_detected_pv_split_pie.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_reliability_assessment(
+    df: pd.DataFrame,
+    output_dir: Path,
+    threshold_pct: float,
+    reliability_margin_pct: float,
+):
+    reliable_count = int(df["is_reliable_detection"].sum())
+    needs_review_count = int(len(df) - reliable_count)
+    detected = df[df["detected_battery"]]
+    reliable_detected = int(detected["is_reliable_detection"].sum())
+    review_detected = int(len(detected) - reliable_detected)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    axes[0].pie(
+        [reliable_count, needs_review_count],
+        labels=["Reliable", "Needs review"],
+        colors=[COLOR_BLACK, COLOR_RED],
+        autopct="%1.1f%%",
+        startangle=90,
+        wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+    )
+    axes[0].set_title(
+        "Overall reliability assessment\n"
+        f"(status success + |prob - {threshold_pct:.0f}%| >= {reliability_margin_pct:.0f}%)"
+    )
+
+    axes[1].bar(
+        ["Reliable detected", "Detected needs review"],
+        [reliable_detected, review_detected],
+        color=[COLOR_BLACK, COLOR_RED],
+    )
+    axes[1].set_title("Reliability among detected battery customers")
+    axes[1].set_ylabel("Customers")
+    axes[1].grid(axis="y", linestyle="--", alpha=0.25)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "battery_detection_reliability_assessment.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def _save_portfolio_summary_tables(
+    df: pd.DataFrame,
+    output_dir: Path,
+    threshold_pct: float,
+    reliability_margin_pct: float,
+):
+    total_customers = int(len(df))
+    total_pv_customers = int(df["is_pv_customer_bool"].sum())
+    total_non_pv_customers = total_customers - total_pv_customers
+
+    detected_total = int(df["detected_battery"].sum())
+    detected_pv = int((df["detected_battery"] & df["is_pv_customer_bool"]).sum())
+    detected_non_pv = int((df["detected_battery"] & ~df["is_pv_customer_bool"]).sum())
+
+    reliable_total = int(df["is_reliable_detection"].sum())
+    reliable_detected = int((df["is_reliable_detection"] & df["detected_battery"]).sum())
+
+    capacity_series = pd.to_numeric(
+        df.loc[df["detected_battery"], _pick_column(df.columns, CAPACITY_CANDIDATES)] if _pick_column(df.columns, CAPACITY_CANDIDATES) else pd.Series(dtype=float),
+        errors="coerce",
+    ).dropna()
+
+    summary_rows = [
+        ("threshold_pct", float(threshold_pct)),
+        ("reliability_margin_pct", float(reliability_margin_pct)),
+        ("total_customers", total_customers),
+        ("total_pv_customers", total_pv_customers),
+        ("total_non_pv_customers", total_non_pv_customers),
+        ("detected_battery_total", detected_total),
+        ("detected_battery_pv", detected_pv),
+        ("detected_battery_non_pv", detected_non_pv),
+        (
+            "detected_share_of_all_customers_pct",
+            round(100.0 * detected_total / max(total_customers, 1), 2),
+        ),
+        (
+            "detected_share_of_pv_customers_pct",
+            round(100.0 * detected_pv / max(total_pv_customers, 1), 2),
+        ),
+        (
+            "detected_non_pv_share_of_detected_pct",
+            round(100.0 * detected_non_pv / max(detected_total, 1), 2),
+        ),
+        ("reliable_total", reliable_total),
+        ("reliable_detected", reliable_detected),
+        (
+            "reliable_detected_share_pct",
+            round(100.0 * reliable_detected / max(detected_total, 1), 2),
+        ),
+        (
+            "avg_detected_battery_probability_pct",
+            round(float(df.loc[df["detected_battery"], "battery_prob_pct"].mean()), 2)
+            if detected_total > 0
+            else np.nan,
+        ),
+        (
+            "median_detected_battery_probability_pct",
+            round(float(df.loc[df["detected_battery"], "battery_prob_pct"].median()), 2)
+            if detected_total > 0
+            else np.nan,
+        ),
+        (
+            "avg_detected_capacity_kwh",
+            round(float(capacity_series.mean()), 3) if not capacity_series.empty else np.nan,
+        ),
+        (
+            "median_detected_capacity_kwh",
+            round(float(capacity_series.median()), 3) if not capacity_series.empty else np.nan,
+        ),
+    ]
+    summary_df = pd.DataFrame(summary_rows, columns=["metric", "value"])
+    summary_df.to_csv(output_dir / "battery_portfolio_summary_table.csv", index=False)
+
+    overview_df = pd.DataFrame(
+        [
+            {
+                "segment": "PV customers",
+                "customers": int(total_pv_customers),
+                "detected_battery": int(detected_pv),
+                "not_detected": int(total_pv_customers - detected_pv),
+                "detected_share_pct": round(100.0 * detected_pv / max(total_pv_customers, 1), 2),
+            },
+            {
+                "segment": "Non-PV customers",
+                "customers": int(total_non_pv_customers),
+                "detected_battery": int(detected_non_pv),
+                "not_detected": int(total_non_pv_customers - detected_non_pv),
+                "detected_share_pct": round(100.0 * detected_non_pv / max(total_non_pv_customers, 1), 2),
+            },
+            {
+                "segment": "Total portfolio",
+                "customers": int(total_customers),
+                "detected_battery": int(detected_total),
+                "not_detected": int(total_customers - detected_total),
+                "detected_share_pct": round(100.0 * detected_total / max(total_customers, 1), 2),
+            },
+        ]
+    )
+    overview_df.to_csv(output_dir / "battery_portfolio_overview_table.csv", index=False)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate key customer battery-analysis plots from a battery results CSV."
+        )
+    )
+    parser.add_argument(
+        "--input-csv",
+        type=Path,
+        default=Path("battery_residential_results_v7.csv"),
+        help="Path to customer-level battery result CSV.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("results/battery_detection_plots"),
+        help="Directory where plots will be written.",
+    )
+    parser.add_argument(
+        "--threshold-pct",
+        type=float,
+        default=50.0,
+        help="Battery detection threshold in percent (default: 50).",
+    )
+    parser.add_argument(
+        "--reliability-margin-pct",
+        type=float,
+        default=15.0,
+        help=(
+            "Minimum absolute distance from threshold (in percentage points) "
+            "to consider a classification reliable (default: 15)."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    results_df, status_col = _load_and_prepare(
+        args.input_csv,
+        args.threshold_pct,
+        args.reliability_margin_pct,
+    )
+
+    _plot_pie_detected_share(results_df, args.output_dir, args.threshold_pct)
+    _plot_probability_distribution(results_df, args.output_dir, args.threshold_pct)
+    _plot_status_breakdown(results_df, args.output_dir, status_col)
+    _plot_capacity_distribution(results_df, args.output_dir)
+    _plot_pv_split_among_detected(results_df, args.output_dir)
+    _plot_reliability_assessment(
+        results_df,
+        args.output_dir,
+        args.threshold_pct,
+        args.reliability_margin_pct,
+    )
+    _save_portfolio_summary_tables(
+        results_df,
+        args.output_dir,
+        args.threshold_pct,
+        args.reliability_margin_pct,
+    )
+
+    detected_count = int(results_df["detected_battery"].sum())
+    total_count = int(len(results_df))
+    total_pv = int(results_df["is_pv_customer_bool"].sum())
+    detected_pv = int((results_df["detected_battery"] & results_df["is_pv_customer_bool"]).sum())
+    detected_non_pv = int((results_df["detected_battery"] & ~results_df["is_pv_customer_bool"]).sum())
+    print(f"Wrote plots to: {args.output_dir}")
+    print(
+        f"Detected battery customers: {detected_count}/{total_count} "
+        f"({(100.0 * detected_count / max(total_count, 1)):.2f}%)"
+    )
+    print(
+        f"Detected among PV customers: {detected_pv}/{total_pv} "
+        f"({(100.0 * detected_pv / max(total_pv, 1)):.2f}%)"
+    )
+    print(
+        f"Detected without PV flag: {detected_non_pv} "
+        f"({(100.0 * detected_non_pv / max(detected_count, 1)):.2f}% of detected)"
+    )
+    print("Wrote summary tables:")
+    print(f"- {args.output_dir / 'battery_portfolio_summary_table.csv'}")
+    print(f"- {args.output_dir / 'battery_portfolio_overview_table.csv'}")
+
+
 if __name__ == "__main__":
-    # A. Weather Setup
-    if os.path.exists(WEATHER_CACHE_PATH):
-        weather_df = pd.read_parquet(WEATHER_CACHE_PATH)
-    else:
-        _, raw_weather = meteo.env_data()
-        weather_df = prepare_weather(raw_weather)
-        weather_df.to_parquet(WEATHER_CACHE_PATH)
-
-    # B. Model Load/Train
-    model, fitted_scaler, anomaly_threshold = load_assets()
-    if model is None:
-        train_file = os.path.join(DIR, 'all_sources_load_with_weather.parquet')
-        df_train_raw = pd.read_parquet(train_file)
-        model, fitted_scaler, anomaly_threshold = train_and_calibrate(df_train_raw, THRESHOLD_PERCENTILE)
-        save_assets(model, fitted_scaler, anomaly_threshold)
-
-    # C. DETECTION PHASE (Optimized for 20k IDs)
-    results_collector = []
-    data_gen = re_data.load_all_data_parallel_generator(os.path.join(DIR, 'ETHZ_ALL'), batch_size=2)
-    model.eval()
-    feature_cols = ['value_kw_mean', 'glob_rad', 'temp']
-
-    print(f"Detection started (Threshold: {anomaly_threshold:.6f})...")
-
-    for batch_idx, batch_df in enumerate(data_gen):
-        if batch_df.empty: continue
-        
-        batch_df['DT_UTC'] = pd.to_datetime(batch_df['DT_UTC']).dt.tz_localize(None)
-        if 'CONSO_KWH' in batch_df.columns:
-            batch_df = batch_df.rename(columns={'CONSO_KWH': 'value_kw_mean'})
-        print(batch_df['DT_UTC'])
-        batch_df = batch_df.merge(weather_df, left_on="DT_UTC", right_index=True, how="left")
-        batch_df[feature_cols[1:]] = batch_df[feature_cols[1:]].ffill().bfill()
-        print(weather_df.head())
-        # VECTORIZED SCALING (Huge speedup)
-        batch_df[feature_cols] = fitted_scaler.transform(batch_df[feature_cols])
-        
-        id_col = 'ID' if 'ID' in batch_df.columns else 'id_customer'
-        batch_df['date_only'] = batch_df['DT_UTC'].dt.date
-        
-        # GROUP BY DAY
-        day_tensors = []
-        day_metadata = []
-
-        for (c_id, date), day_data in batch_df.groupby([id_col, 'date_only']):
-            if len(day_data) == 96:
-                day_values = day_data.sort_values("DT_UTC")[feature_cols].values
-                day_tensors.append(day_values)
-                day_metadata.append((c_id, date))
-
-        # BATCHED INFERENCE
-        if day_tensors:
-            input_batch = torch.FloatTensor(np.array(day_tensors))
-            with torch.no_grad():
-                recon = model(input_batch)
-                err_per_step = (recon[:, :, 0] - input_batch[:, :, 0]) ** 2
-                mean_errors = torch.mean(err_per_step, dim=1)
-                spike_counts = (err_per_step > anomaly_threshold).sum(dim=1)
-
-            # Record Anomalies
-            for i in range(len(mean_errors)):
-                m_err = mean_errors[i].item()
-                spikes = spike_counts[i].item()
-                if m_err > anomaly_threshold or spikes >= 4:
-                    c_id, date = day_metadata[i]
-                    results_collector.append({
-                        "ID": c_id, "Date": date, "MSE": round(m_err, 6),
-                        "Confidence": round(m_err / anomaly_threshold, 2), "Spikes": spikes
-                    })
-
-        if (batch_idx + 1) % 5 == 0: print(f"Processed {batch_idx + 1} batches...")
-        del batch_df; gc.collect()
-
-    # D. Final Summary
-    if results_collector:
-        final_df = pd.DataFrame(results_collector)
-        summary = final_df.groupby('ID').agg({'Date': 'count', 'Confidence': 'mean', 'Spikes': 'mean'})
-        summary['Score'] = (summary['Date'] * summary['Confidence']).round(2)
-        summary = summary.sort_values('Score', ascending=False)
-        summary.to_csv("TOP_BATTERY_SUSPECTS.csv")
-        print(f"\nFound {len(summary)} potential battery owners.")
-        print(summary.head(10))
-        plot_battery_results(results_collector, anomaly_threshold)
-    else:
-        print("\nNo anomalies detected.")
+    main()
