@@ -528,9 +528,28 @@ if __name__ == "__main__":
                 ax = plt.gca()
                 ax.set_facecolor(PLOT_BACKGROUND_COLOR)
                 x = [t.hour + t.minute/60 for t in dark.index]
-                plt.plot(x, dark.values, linestyle='--', color=PLOT_DARK_DAY_COLOR, alpha=PLOT_DARK_ALPHA, label='Grid (Dark Day)')
-                plt.plot(x, sun.values, color=PLOT_SUNNY_DAY_COLOR, label='Battery (Sunny Day)')
-                plt.fill_between(x, sun.values, dark.values, color=PLOT_SUNNY_DAY_COLOR, alpha=PLOT_FILL_ALPHA)
+                plt.plot(
+                    x,
+                    dark.values,
+                    linestyle='--',
+                    color=PLOT_DARK_DAY_COLOR,
+                    alpha=PLOT_DARK_ALPHA,
+                    label='Grid consumption (Dark Day baseline)',
+                )
+                plt.plot(
+                    x,
+                    sun.values,
+                    color=PLOT_SUNNY_DAY_COLOR,
+                    label='Grid consumption (Sunny Day)',
+                )
+                plt.fill_between(
+                    x,
+                    sun.values,
+                    dark.values,
+                    color=PLOT_SUNNY_DAY_COLOR,
+                    alpha=PLOT_FILL_ALPHA,
+                    label='Inferred battery contribution',
+                )
                 plt.title(
                     f"RESIDENTIAL ID: {customer_id} | Prob: {analysis['battery_prob']}%",
                     color=PLOT_TEXT_COLOR,
