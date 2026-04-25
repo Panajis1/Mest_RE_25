@@ -19,7 +19,7 @@ import data.fast_load_smart_meter as re_data
 
 # --- 2. File Paths (edit first) ---
 # Data source root containing parquet files and metadata.
-DATA_DIR = "C:\\Users\\Aline\\Documents\\Studium\\Case Study\\processed_data\\ETHZ_ALL"
+DATA_DIR = "ETHZ_ALL"
 # Output directory for profile plots of detected battery customers.
 PLOT_DIR = "residential_profiles_v7"
 # Additional output folder under results/ for customer profile plots.
@@ -28,7 +28,7 @@ RESULTS_PLOT_DIR = "results/battery_detection_customer_plots"
 PV_SUMMARY_CSV = "scripts/prob_summary.csv"
 WEATHER_CSV = "weather_data.csv"
 # Final customer-level results output.
-RESULTS_CSV = "battery_residential_results_v7.csv"
+RESULTS_CSV = "results/battery_residential_results_v7.csv"
 
 # --- 3. Tunable Parameters (edit here) ---
 # Partner segment to process from metadata.
@@ -61,12 +61,16 @@ BATTERY_CLASSIFICATION_THRESHOLD = 0.5
 # Option 1 accuracy guard: only classify battery if PV exists.
 ENFORCE_PV_FOR_BATTERY_DETECTION = True
 NON_PV_REJECTION_STATUS = "REJECTED: No PV Signal"
-# Sigmoid scoring weights for battery probability.
-SIGMOID_INTERCEPT = -1.8
-SIGMOID_PEAK_SHIFT_WEIGHT = 0.05
-SIGMOID_GAP_RATIO_WEIGHT = 7.0
+# Sigmoid scoring weights for battery probability (tuned stricter).
+SIGMOID_INTERCEPT = -3
+SIGMOID_PEAK_SHIFT_WEIGHT = 0.04
+SIGMOID_GAP_RATIO_WEIGHT = 6.2
 INJECTION_RATIO_REFERENCE = 0.4
-INJECTION_BONUS_WEIGHT = 2.5
+INJECTION_BONUS_WEIGHT = 2.0
+SIGMOID_CONSISTENCY_WEIGHT = 1.1
+SIGMOID_SHIFT_RATIO_WEIGHT = 0.7
+STRICT_MIN_MATCHED_SUNNY_DAYS = 5
+LOW_MATCHED_DAYS_Z_PENALTY = 0.8
 INJECTION_RATIO_MIN_POTENTIAL_KWH = 0.1
 INJECTION_RATIO_CLIP_MIN = 0.0
 INJECTION_RATIO_CLIP_MAX = 2.0
@@ -89,10 +93,10 @@ CAPACITY_MAX_REALISTIC_KWH = 30.0
 # Alternative nominal-capacity approach:
 # We estimate nominal capacity from shifted energy assuming only a fraction
 # of the battery is typically discharged in the evening.
-NOMINAL_CAPACITY_DISCHARGE_FRACTION = 0.45
+NOMINAL_CAPACITY_DISCHARGE_FRACTION = 0.65
 MIN_SHIFT_FOR_NOMINAL_CAPACITY_KWH = 0.5
-PV_ANCHOR_KWH_PER_KWP = 2.0
-PV_ANCHOR_BLEND_WEIGHT = 0.40
+PV_ANCHOR_KWH_PER_KWP = 1.4
+PV_ANCHOR_BLEND_WEIGHT = 0.30
 # Informative PV-based ceiling (reported only, not used as hard cap).
 CAPACITY_MAX_PER_KWP = 3.5
 # Use NaN instead of forcing 2 kWh when all inferred shifts are below the realistic floor.
@@ -113,7 +117,7 @@ PLOT_TEXT_COLOR = "white"
 PLOT_DARK_DAY_COLOR = "white"
 PLOT_SUNNY_DAY_COLOR = "red"
 # Runtime/reporting controls.
-PROGRESS_PRINT_EVERY = 25
+PROGRESS_PRINT_EVERY = 100
 GC_EVERY_N_BATCHES = 10
 
 
@@ -379,9 +383,11 @@ def analyze_battery_residential_v7(df_customer, weather_df, pv_row, temp_buffer=
             + (SIGMOID_PEAK_SHIFT_WEIGHT * peak_shift)
             + (SIGMOID_GAP_RATIO_WEIGHT * gap_ratio)
             + inj_bonus
-            + 1.5 * float(np.clip(consistency, 0.0, 1.0))
-            + 1.0 * float(np.clip(np.nan_to_num(shift_ratio, nan=0.0), 0.0, 1.0))
+            + SIGMOID_CONSISTENCY_WEIGHT * float(np.clip(consistency, 0.0, 1.0))
+            + SIGMOID_SHIFT_RATIO_WEIGHT * float(np.clip(np.nan_to_num(shift_ratio, nan=0.0), 0.0, 1.0))
         )
+        if len(sunny_matched) < STRICT_MIN_MATCHED_SUNNY_DAYS:
+            z -= LOW_MATCHED_DAYS_Z_PENALTY
 
         # Robust Sigmoid to prevent Overflow
         prob = 1 / (1 + np.exp(-np.clip(z, SIGMOID_CLIP_MIN, SIGMOID_CLIP_MAX)))
@@ -487,8 +493,18 @@ if __name__ == "__main__":
             f"No customer IDs found in {PV_SUMMARY_CSV}. "
             "At least one matching ID is required for analysis."
         )
-    import data.envdata as meteo
-    import data.fast_load_smart_meter as re_data
+    
+    if not os.path.exists(WEATHER_CSV):
+        print(f"Weather data file {WEATHER_CSV} not found. Attempting to generate it...")
+        try:
+            _, df = meteo.env_data()
+            df.to_csv(WEATHER_CSV, index=True)
+            print(f"Weather data successfully generated and saved to {WEATHER_CSV}.")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to generate weather data CSV: {e}. "
+                "Please ensure the generation function works or provide a valid weather CSV."
+            )
     weather_df = pd.read_csv(WEATHER_CSV, parse_dates=['timestamp'], index_col='timestamp')
     weather_df = _prepare_weather_for_merge(weather_df)
 

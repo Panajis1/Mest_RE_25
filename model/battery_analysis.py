@@ -136,6 +136,7 @@ def _plot_pie_detected_share(df: pd.DataFrame, output_dir: Path, threshold_pct: 
         autopct="%1.1f%%",
         startangle=90,
         wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+        textprops={"color": "white"},
     )
     plt.title(
         f"Detected battery share among PV customers\n"
@@ -245,6 +246,7 @@ def _plot_pv_split_among_detected(df: pd.DataFrame, output_dir: Path):
         autopct="%1.1f%%",
         startangle=90,
         wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+        textprops={"color": "white"},
     )
     plt.title(f"PV split among detected battery customers\n(n = {len(detected)})")
     plt.tight_layout()
@@ -272,6 +274,7 @@ def _plot_reliability_assessment(
         autopct="%1.1f%%",
         startangle=90,
         wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+        textprops={"color": "white"},
     )
     axes[0].set_title(
         "Overall reliability assessment\n"
