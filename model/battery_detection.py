@@ -189,7 +189,7 @@ def _estimate_partner_customer_count(data_dir, partner_type=PARTNER_TYPE):
         return None
 
 
-def analyze_battery_residential_v7(df_customer, weather_df, pv_row, temp_buffer=TEMP_MATCH_BUFFER_C):
+def analyze_battery_residential_v7(df_customer, weather_df, pv_row, temp_buffer=TEMP_MATCH_BUFFER_C, sunset_map=None):
     res = {"battery_prob": 0, "has_battery": "No", "status": "Success", 
            "observed_gap_kwh": 0, "profiles": None,
            "estimated_battery_capacity_kwh": np.nan,
@@ -476,7 +476,23 @@ def analyze_battery_residential_v7(df_customer, weather_df, pv_row, temp_buffer=
     except Exception as e:
         res["status"] = f"ERROR: {e}"
         return res
-
+def get_dynamic_evening_window(daily_data, sunset_threshold=20.0):
+    """
+    Finds the first timestamp where radiation drops below threshold 
+    after the peak of the day.
+    """
+    # 1. Find the time of max radiation (Solar Noon approx)
+    idx_max_rad = daily_data['global_rad_W'].idxmax()
+    
+    # 2. Look at data after solar noon to find sunset
+    afternoon_data = daily_data.loc[idx_max_rad:]
+    
+    # 3. Sunset is the first index where radiation < threshold
+    sunset_indices = afternoon_data[afternoon_data['global_rad_W'] < sunset_threshold].index
+    
+    if not sunset_indices.empty:
+        return sunset_indices[0]
+    return None
 
 ## --- 2. Execution Block ---
 if __name__ == "__main__":
@@ -508,6 +524,23 @@ if __name__ == "__main__":
     weather_df = pd.read_csv(WEATHER_CSV, parse_dates=['timestamp'], index_col='timestamp')
     weather_df = _prepare_weather_for_merge(weather_df)
 
+    print("Calculating dynamic sunset times from weather data...")
+    sunset_mapping = {}
+    for date, day_data in weather_df.groupby(weather_df.index.date):
+        # Find solar noon (peak radiation)
+        peak_time = day_data['global_rad_W'].idxmax()
+        # Find sunset (first time after peak where radiation < threshold)
+        afternoon = day_data.loc[peak_time:]
+        sunset_candidates = afternoon[afternoon['global_rad_W'] < SUNSET_RAD_THRESHOLD_W]
+        
+        if not sunset_candidates.empty:
+            sunset_mapping[date] = sunset_candidates.index[0]
+        else:
+            # Fallback to a default time if data is missing or unusual
+            sunset_mapping[date] = pd.Timestamp(date) + pd.Timedelta(hours=18)
+
+
+
     partner_type = PARTNER_TYPE
     batch_size = BATCH_SIZE
     total_customers_hint = len(eligible_customer_ids)
@@ -535,7 +568,7 @@ if __name__ == "__main__":
             continue
         for customer_id, customer_data in batch_df.groupby("ID", sort=False):
             pv_info = pv_summary.loc[customer_id]
-            analysis = analyze_battery_residential_v7(customer_data.set_index("DT_UTC"), weather_df, pv_info)
+            analysis = analyze_battery_residential_v7(customer_data.set_index("DT_UTC"), weather_df, pv_info, sunset_map = sunset_mapping)
             
             # Save strictly Residential High-Prob Plots
             if analysis["has_battery"] == "Yes" and analysis["profiles"] is not None:
@@ -603,5 +636,4 @@ if __name__ == "__main__":
     print("\n--- FINAL RESIDENTIAL SUMMARY ---")
     print(f"Processed unique customers: {unique_processed}")
     print(f"Total analyses: {len(final_df)} | Found: {(final_df['has_battery']=='Yes').sum()}")
-    print(f"Avg Prob: {final_df['battery_prob'].mean():.2f}%")
     final_df.to_csv(RESULTS_CSV, index=False)

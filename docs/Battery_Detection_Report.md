@@ -204,8 +204,11 @@ From merged 15-min data:
 ### 4.4 Build Evening Profiles and Dynamic Sunset
 
 - Compute average sunny-day radiation profile by time-of-day.
+- Daily Solar Peak: For each day, the script identifies the time of maximum global radiation.
 - Sunset chosen as first time after `SUNSET_SCAN_START_HOUR` where radiation falls below `SUNSET_RAD_THRESHOLD_W`; fallback `DEFAULT_SUNSET_TIME`.
+- Window Alignment in Summer: The window might start as late as 21:00. Winter: The window might start as early as 16:30.
 - Build dark and sunny evening consumption profiles from `sunset_time` to `EVENING_END_TIME`.
+- Profile Integration: The Evening Profile is integrated from this dynamic start time until `EVENING_END_TIME`. This ensures that any residual daytime PV production is excluded from the battery discharge calculation.
 
 ### 4.5 Core Detection Signals
 
