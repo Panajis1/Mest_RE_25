@@ -1,4 +1,5 @@
 print("Starting batch processing...")
+import sys
 from pathlib import Path
 import gc
 import numpy as np
@@ -7,6 +8,14 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_HP_MODEL_DIR = Path(__file__).resolve().parent
+_DATA_DIR = _REPO_ROOT / "data"
+
+for _p in [str(_HP_MODEL_DIR), str(_DATA_DIR)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from hp_detection_functions import (
     RF_PARAMS,
@@ -24,14 +33,13 @@ from envdata import env_data
 
 
 # ============================================================
-# CONFIG
+# CONFIG  ← update these paths before running (will be replaced by config system)
 # ============================================================
 
-BASE_DIR = Path("C:/Users/Master/Documents/Mest_RE_25/hp_label")
-TRAIN_FILE = BASE_DIR / "all_sources_load_with_weather.parquet"
+TRAIN_FILE = _REPO_ROOT / "data" / "processed" / "training" / "all_sources_load_with_weather.parquet"
 
-PARQUET_DIR = Path("C:/Users/Master/Documents/Mest_RE_25/RE_data")
-OUTPUT_DIR = PARQUET_DIR / "hp_detection_outputs"
+PARQUET_DIR = _REPO_ROOT / "data" / "raw" / "re"
+OUTPUT_DIR = _HP_MODEL_DIR / "hp_detection_outputs"
 METADATA_FILE = PARQUET_DIR / "metadata"
 
 KWH_TO_KW_FACTOR = 4.0

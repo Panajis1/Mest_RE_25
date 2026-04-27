@@ -30,7 +30,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 
-from trainingfunctions_internalvalidation_modified import (
+from hp_detection_functions import (
     TEMP_F_THRESHOLD,
     convert_f_to_c_if_needed,
     infer_hp_season_label,

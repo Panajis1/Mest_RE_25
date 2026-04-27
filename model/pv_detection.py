@@ -1,9 +1,11 @@
 #%%
 
 import concurrent.futures
+import json
+import os
 import sys
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, Optional, Set, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -28,6 +30,36 @@ try:
 except ImportError:
     _HAS_TQDM = False
 
+
+def write_plotly_figures_to_dir(
+    figs: Dict[str, Any],
+    out_dir: Union[str, Path],
+    *,
+    fmt: str = "png",
+    scale: float = 2.0,
+) -> list:
+    """
+    Write Plotly figures to *out_dir* as static images (requires the
+    ``kaleido`` package: ``pip install kaleido``).
+    """
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    written: list = []
+    for name, fig in figs.items():
+        if fig is None:
+            continue
+        path = out / f"{name}.{fmt}"
+        try:
+            fig.write_image(str(path), scale=scale)
+        except Exception as e:
+            raise RuntimeError(
+                "Plotly static image export failed. Install kaleido in your environment "
+                "(e.g. pip install 'kaleido>=0.2,<1')."
+            ) from e
+        written.append(str(path))
+    return written
+
+
 #%%
 def load_meteo_data():
     """
@@ -51,10 +83,14 @@ def load_meteo_data():
     return combined_meteo, avg_meteo_15min
 
 
-def load_re_data():
+def load_re_data(max_cons_kwh: float = 10_000):
     """
-    Load Romande Energie smart meter data and compute a filtered subset
-    of customers with annual consumption <= 10 MWh.
+    Load Romande Energie smart meter data (all customers in parquet files)
+    and return a filtered subset whose **total** ``CONSO_KWH`` over the
+    available history is <= *max_cons_kwh* (kWh, not kW).
+
+    For large datasets prefer :func:`stream_customer_summary` plus metadata
+    filters (e.g. :func:`particuliers_customer_ids`) instead of loading all rows.
     """
     data_dir = Path(__file__).resolve().parent.parent / "data" / "re_data" / "ETHZ"
     re_data_gen = re_data.load_all_data_generator(str(data_dir))
@@ -75,10 +111,149 @@ def load_re_data():
         .reset_index()
     )
 
-    # Focus on customers with <= 10 MWh total consumption
-    ids = customer_summary[customer_summary["sum_cons_kwh"] <= 10000][["ID"]]
+    ids = customer_summary[customer_summary["sum_cons_kwh"] <= max_cons_kwh][["ID"]]
     re_data_df_small = re_data_df[re_data_df["ID"].isin(ids["ID"])]
     return re_data_df, re_data_df_small, customer_summary
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers (shared by stream_* functions)
+# ---------------------------------------------------------------------------
+
+def _build_meteo_merge_frame(avg_meteo_15min: pd.DataFrame) -> pd.DataFrame:
+    merge_cols = ["global_rad_W"]
+    if "t_2m_C" in avg_meteo_15min.columns:
+        merge_cols.append("t_2m_C")
+    return (
+        avg_meteo_15min[merge_cols]
+        .rename_axis("DT_UTC")
+        .reset_index()
+    )
+
+
+def _prepare_raw_file(
+    fpath: str,
+    meteo_for_merge: pd.DataFrame,
+    target_ids: Optional[set] = None,
+) -> pd.DataFrame:
+    """Load a single parquet file, convert timestamps, merge meteo, downcast."""
+    df = pd.read_parquet(fpath)
+    if df.empty:
+        return df
+    df["ID"] = df["ID"].astype(str)
+    if target_ids is not None:
+        df = df[df["ID"].isin(target_ids)]
+        if df.empty:
+            return df
+    dt = pd.to_datetime(df["DT_UTC"], utc=True)
+    df["DT_UTC"] = dt.dt.tz_convert(None)
+    for col in ("CONSO_KWH", "PROD_KWH"):
+        if col in df.columns:
+            df[col] = df[col].astype("float32")
+    df = df.merge(meteo_for_merge, on="DT_UTC", how="left")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Streaming customer summary (replaces load_re_data for large datasets)
+# ---------------------------------------------------------------------------
+
+def stream_customer_summary(
+    data_dir: Optional[str] = None,
+    max_cons_kwh: float = 10_000,
+    allowed_ids: Optional[Set[str]] = None,
+) -> tuple:
+    """
+    Scan all parquet files to compute per-customer summary statistics without
+    ever holding more than one file in memory.
+
+    ``sum_cons_kwh`` is the **sum of** ``CONSO_KWH`` **over all timestamps
+    present** for that customer (full meter history in the files), not a
+    calendar-year normalization. *max_cons_kwh* is in **kWh**.
+
+    Parameters
+    ----------
+    allowed_ids
+        If given, only these customer IDs are aggregated and returned; use
+        with metadata (e.g. :func:`particuliers_customer_ids`) before applying
+        the consumption cap.
+
+    Returns
+    -------
+    customer_summary : DataFrame
+        One row per customer with sum_cons_kwh, sum_prod_kwh, dt_start, dt_end.
+    target_ids : set[str]
+        Customer IDs with ``sum_cons_kwh`` <= *max_cons_kwh* (among *allowed_ids*
+        when that set is provided).
+    """
+    if data_dir is None:
+        data_dir = str(
+            Path(__file__).resolve().parent.parent / "data" / "re_data" / "ETHZ"
+        )
+
+    if allowed_ids is not None and not allowed_ids:
+        return pd.DataFrame(), set()
+
+    files = re_data.get_parquet_files(data_dir)
+    partial_summaries: list[pd.DataFrame] = []
+
+    _iter = tqdm(files, desc="Scanning files") if _HAS_TQDM else files
+    for fpath in _iter:
+        try:
+            df = pd.read_parquet(
+                fpath, columns=["ID", "CONSO_KWH", "PROD_KWH", "DT_UTC"]
+            )
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        df["ID"] = df["ID"].astype(str)
+        if allowed_ids is not None:
+            df = df.loc[df["ID"].isin(allowed_ids)]
+            if df.empty:
+                continue
+        df["DT_UTC"] = pd.to_datetime(df["DT_UTC"])
+        partial = df.groupby("ID").agg(
+            sum_cons_kwh=pd.NamedAgg(column="CONSO_KWH", aggfunc="sum"),
+            sum_prod_kwh=pd.NamedAgg(column="PROD_KWH", aggfunc="sum"),
+            dt_start=pd.NamedAgg(column="DT_UTC", aggfunc="min"),
+            dt_end=pd.NamedAgg(column="DT_UTC", aggfunc="max"),
+        )
+        partial_summaries.append(partial)
+        del df
+
+    if not partial_summaries:
+        return pd.DataFrame(), set()
+
+    combined = pd.concat(partial_summaries)
+    customer_summary = (
+        combined.groupby(level=0)
+        .agg({
+            "sum_cons_kwh": "sum",
+            "sum_prod_kwh": "sum",
+            "dt_start": "min",
+            "dt_end": "max",
+        })
+        .sort_values("sum_cons_kwh", ascending=False)
+        .reset_index()
+        .rename(columns={"index": "ID"})
+    )
+    if "ID" not in customer_summary.columns:
+        customer_summary = customer_summary.rename(
+            columns={customer_summary.columns[0]: "ID"}
+        )
+
+    if allowed_ids is not None:
+        customer_summary = customer_summary.loc[
+            customer_summary["ID"].isin(allowed_ids)
+        ].copy()
+
+    target_ids = set(
+        customer_summary.loc[
+            customer_summary["sum_cons_kwh"] <= max_cons_kwh, "ID"
+        ].astype(str)
+    )
+    return customer_summary, target_ids
 
 
 def align_meteo_with_re_data(avg_meteo_15min: pd.DataFrame, re_data_df_small: pd.DataFrame):
@@ -112,23 +287,20 @@ def align_meteo_with_re_data(avg_meteo_15min: pd.DataFrame, re_data_df_small: pd
     return meteo_window, re_data_with_meteo
 
 
-def build_daily_features(
-    avg_meteo_15min: pd.DataFrame, re_data_with_meteo: pd.DataFrame
-):
+def compute_daily_weather(avg_meteo_15min: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute daily and midday aggregates for weather and smart-meter data and
-    merge them into a tidy (customer, date) table, including a radiation bucket.
+    Compute daily weather features (G_daily, G_midday, rad_bucket) from meteo
+    data alone.  No customer data is needed -- call once and reuse across all
+    streaming batches.
     """
-    if avg_meteo_15min.empty or re_data_with_meteo.empty:
-        return pd.DataFrame(), pd.DataFrame()
+    if avg_meteo_15min.empty:
+        return pd.DataFrame()
 
-    # --- Weather daily features ---
-    meteo = avg_meteo_15min.copy()
-    meteo = meteo.sort_index()
-    meteo = meteo.reset_index().rename(columns={"index": "timestamp"})
+    meteo = avg_meteo_15min.sort_index().reset_index().rename(
+        columns={"index": "timestamp"}
+    )
     meteo["date"] = meteo["timestamp"].dt.date
     meteo["hour"] = meteo["timestamp"].dt.hour
-
     meteo["is_midday"] = (meteo["hour"] >= 10) & (meteo["hour"] < 16)
 
     daily_weather = (
@@ -142,26 +314,18 @@ def build_daily_features(
     )
     daily_weather = daily_weather.join(midday_weather, how="left")
 
-    # Add monthly radiation buckets (low / medium / high)
     daily_weather_index = pd.to_datetime(daily_weather.index)
     daily_weather = daily_weather.copy()
     daily_weather["month"] = daily_weather_index.to_period("M")
 
-    # Compute month-wise quantiles on G_midday; handle missing G_midday robustly
     def month_low_q(x):
         return x.quantile(0.2)
 
     def month_high_q(x):
         return x.quantile(0.8)
 
-    low_q = (
-        daily_weather.groupby("month")["G_midday"]
-        .transform(month_low_q)
-    )
-    high_q = (
-        daily_weather.groupby("month")["G_midday"]
-        .transform(month_high_q)
-    )
+    low_q = daily_weather.groupby("month")["G_midday"].transform(month_low_q)
+    high_q = daily_weather.groupby("month")["G_midday"].transform(month_high_q)
 
     def bucket_row(row, lq, hq):
         g_mid = row["G_midday"]
@@ -180,10 +344,21 @@ def build_daily_features(
         )
     ]
 
-    # Keep a clean index for merging
     daily_weather = daily_weather.reset_index().rename(columns={"index": "date"})
+    return daily_weather
 
-    # --- Customer daily features ---
+
+def build_customer_daily_features(
+    re_data_with_meteo: pd.DataFrame,
+    daily_weather: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute per-customer daily / midday aggregates and merge with pre-computed
+    daily_weather (which supplies rad_bucket).
+    """
+    if re_data_with_meteo.empty or daily_weather.empty:
+        return pd.DataFrame()
+
     df = re_data_with_meteo.copy()
     df["date"] = df["DT_UTC"].dt.date
     df["hour"] = df["DT_UTC"].dt.hour
@@ -217,11 +392,23 @@ def build_daily_features(
         midday_cust, on=["ID", "date"], how="left"
     )
 
-    # Merge in daily weather features
     daily_features = daily_cust.merge(
         daily_weather, on="date", how="left"
     )
 
+    return daily_features
+
+
+def build_daily_features(
+    avg_meteo_15min: pd.DataFrame, re_data_with_meteo: pd.DataFrame
+):
+    """
+    Backward-compatible wrapper: compute daily weather + customer features.
+    Prefer calling compute_daily_weather() and build_customer_daily_features()
+    separately in streaming pipelines to avoid recomputing weather each time.
+    """
+    daily_weather = compute_daily_weather(avg_meteo_15min)
+    daily_features = build_customer_daily_features(re_data_with_meteo, daily_weather)
     return daily_features, daily_weather
 
 
@@ -622,7 +809,11 @@ def plot_customer_high_low_profile(
     return fig
 
 
-def plot_population_statistics(pv_indicators: pd.DataFrame, show: bool = True):
+def plot_population_statistics(
+    pv_indicators: pd.DataFrame,
+    show: bool = True,
+    save_dir: Optional[Union[str, Path]] = None,
+):
     """
     Create population-level Plotly figures for PV indicators.
     """
@@ -676,6 +867,9 @@ def plot_population_statistics(pv_indicators: pd.DataFrame, show: bool = True):
     if show:
         figs["delta_scatter"].show()
 
+    if save_dir:
+        write_plotly_figures_to_dir(figs, save_dir)
+
     return figs
 
 
@@ -683,6 +877,7 @@ def plot_capacity_vs_production_with_ci(
     prob_summary: pd.DataFrame,
     pv_indicators: pd.DataFrame,
     show: bool = True,
+    save_dir: Optional[Union[str, Path]] = None,
 ) -> go.Figure:
     """
     Scatter: estimated PV capacity (kWp) vs yearly production (kWh) with 95% CI error bars.
@@ -713,30 +908,42 @@ def plot_capacity_vs_production_with_ci(
             "floor_to_reg_ratio": "Floor / Regression Capacity",
         },
     )
+    if save_dir:
+        write_plotly_figures_to_dir({"capacity_vs_production_with_ci": fig}, save_dir)
     if show:
         fig.show()
     return fig
 
 
 def plot_capacity_vs_self_consumption(
-    prob_summary: pd.DataFrame, show: bool = True
+    prob_summary: pd.DataFrame,
+    show: bool = True,
+    save_dir: Optional[Union[str, Path]] = None,
 ) -> go.Figure:
     """
     Scatter: estimated PV capacity (kWp) vs self-consumption share (0–1).
+    Y-axis is logarithmic; values at or below zero are clipped to epsilon for display.
     """
-    df = prob_summary.dropna(subset=["pv_capacity_kwp", "sc_share_mean"])
+    _eps = 1e-6
+    df = prob_summary.dropna(subset=["pv_capacity_kwp", "sc_share_mean"]).copy()
+    df["sc_share_plot"] = df["sc_share_mean"].clip(lower=_eps)
     fig = px.scatter(
         df,
         x="pv_capacity_kwp",
-        y="sc_share_mean",
-        hover_data=["customer_id"],
+        y="sc_share_plot",
+        hover_data=["customer_id", "sc_share_mean"],
         title="System Size vs. Self-Consumption Share",
         labels={
             "pv_capacity_kwp": "Estimated PV Capacity (kWp)",
-            "sc_share_mean": "Self-Consumption Share (0.0 - 1.0)",
+            "sc_share_plot": f"Self-consumption share (log scale, ≥{_eps:g})",
         },
     )
-    fig.update_yaxes(range=[0, 1])
+    fig.update_yaxes(
+        type="log",
+        range=[np.log10(_eps), np.log10(1.0)],
+    )
+    if save_dir:
+        write_plotly_figures_to_dir({"capacity_vs_self_consumption": fig}, save_dir)
     if show:
         fig.show()
     return fig
@@ -1208,9 +1415,9 @@ def compute_probabilistic_capacity_parallel(
     batch_size: int = 100,
 ) -> pd.DataFrame:
     """
-    Parallel version of compute_probabilistic_capacity using ProcessPoolExecutor.
-    Processes customers in batches to limit peak RAM usage, and fetches
-    per-customer data on the fly via groupby.get_group.
+    Parallel version of compute_probabilistic_capacity using ThreadPoolExecutor.
+    Threads share memory (no fork duplication); the bootstrap inner loop is
+    NumPy-heavy and releases the GIL, so threads still provide parallelism.
     """
     if re_data_with_meteo.empty or daily_features.empty or pv_indicators.empty:
         return pd.DataFrame()
@@ -1229,7 +1436,7 @@ def compute_probabilistic_capacity_parallel(
     for i in range(0, total_customers, batch_size):
         batch = customer_tasks[i : i + batch_size]
 
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures_map: dict[concurrent.futures.Future, str] = {}
             for row in batch:
                 cid = row["customer_id"]
@@ -1359,8 +1566,375 @@ def compute_probabilistic_capacity(
 
 
 # ---------------------------------------------------------------------------
+# PV forecasting (15-min, per-customer, laptop-friendly)
+# ---------------------------------------------------------------------------
+
+def _safe_float(x, default: float = np.nan) -> float:
+    try:
+        v = float(x)
+        if np.isfinite(v):
+            return v
+        return default
+    except Exception:
+        return default
+
+
+def _year_time_index_15min(year: int) -> pd.DatetimeIndex:
+    start = pd.Timestamp(year=year, month=1, day=1)
+    end = pd.Timestamp(year=year, month=12, day=31, hour=23, minute=45)
+    return pd.date_range(start=start, end=end, freq="15min")
+
+
+def _estimate_customer_pr_monthly(
+    cust_df: pd.DataFrame,
+    pv_capacity_kwp: float,
+    default_pr: float = 0.85,
+    rad_min_w: float = 50.0,
+) -> tuple[float, dict]:
+    """
+    Estimate a per-customer performance ratio (PR) and month multipliers.
+
+    This is designed to be robust when PROD/CONSO semantics are imperfect by
+    leaning on net-load slope vs irradiance and using export only when it is
+    consistent with radiation.
+    """
+    pv_capacity_kwp = _safe_float(pv_capacity_kwp, default=0.0)
+    if pv_capacity_kwp <= 0 or cust_df is None or cust_df.empty:
+        return float(default_pr), {m: 1.0 for m in range(1, 13)}
+
+    req_cols = {"DT_UTC", "CONSO_KWH", "PROD_KWH", "global_rad_W"}
+    if not req_cols.issubset(set(cust_df.columns)):
+        return float(default_pr), {m: 1.0 for m in range(1, 13)}
+
+    df = cust_df.dropna(subset=["DT_UTC", "global_rad_W"]).copy()
+    if df.empty:
+        return float(default_pr), {m: 1.0 for m in range(1, 13)}
+
+    df["hour"] = df["DT_UTC"].dt.hour.astype("int16")
+    df["month"] = df["DT_UTC"].dt.month.astype("int8")
+    rad = df["global_rad_W"].astype("float32")
+
+    # Focus on daylight-ish observations where PV signal exists.
+    daylight_mask = (rad >= rad_min_w) & (df["hour"] >= 6) & (df["hour"] <= 20)
+    dld = df.loc[daylight_mask].copy()
+    if dld.shape[0] < 50:
+        return float(default_pr), {m: 1.0 for m in range(1, 13)}
+
+    # Net-load-informed slope (kWh/15min)/(W/m²).
+    dld["Net_KWH"] = (dld["CONSO_KWH"].astype("float32") - dld["PROD_KWH"].astype("float32"))
+    beta_net, _ = _fit_simple_slope(
+        dld["global_rad_W"].to_numpy(),
+        dld["Net_KWH"].to_numpy(),
+    )
+    pv_slope_from_net = max(0.0, -float(beta_net))
+    pr_from_net = (pv_slope_from_net * STC_FACTOR) / pv_capacity_kwp if pv_capacity_kwp > 0 else np.nan
+
+    # Export-based slope if export is consistent with radiation.
+    prod = dld["PROD_KWH"].astype("float32")
+    has_prod = np.isfinite(prod.to_numpy()).any()
+    pr_from_prod = np.nan
+    if has_prod:
+        g = dld.dropna(subset=["PROD_KWH", "global_rad_W"])
+        if g.shape[0] >= 50:
+            prod_corr = g["PROD_KWH"].corr(g["global_rad_W"])
+            pos_rate = float((g["PROD_KWH"] > 0).mean())
+            if (prod_corr is not None) and np.isfinite(prod_corr) and prod_corr > 0.25 and pos_rate > 0.01:
+                beta_prod, _ = _fit_simple_slope(
+                    g["global_rad_W"].to_numpy(),
+                    g["PROD_KWH"].to_numpy(),
+                )
+                pv_slope_from_prod = max(0.0, float(beta_prod))
+                pr_from_prod = (pv_slope_from_prod * STC_FACTOR) / pv_capacity_kwp
+
+    def _clip_pr(v: float) -> float:
+        if v is None or not np.isfinite(v):
+            return np.nan
+        # Allow mild >1 due to measurement/model mismatch, but cap hard.
+        return float(np.clip(v, 0.05, 1.30))
+
+    pr_from_net = _clip_pr(pr_from_net)
+    pr_from_prod = _clip_pr(pr_from_prod)
+
+    if np.isfinite(pr_from_net) and np.isfinite(pr_from_prod):
+        pr_base = 0.6 * pr_from_net + 0.4 * pr_from_prod
+    elif np.isfinite(pr_from_net):
+        pr_base = pr_from_net
+    elif np.isfinite(pr_from_prod):
+        pr_base = pr_from_prod
+    else:
+        pr_base = float(default_pr)
+
+    # Month multipliers: estimate relative PR by month using net-load slope.
+    pr_by_month: dict[int, float] = {m: 1.0 for m in range(1, 13)}
+    month_prs = {}
+    for m, grp in dld.groupby("month", sort=True):
+        if grp.shape[0] < 50:
+            continue
+        grp = grp.copy()
+        grp["Net_KWH"] = grp["CONSO_KWH"].astype("float32") - grp["PROD_KWH"].astype("float32")
+        b_m, _ = _fit_simple_slope(grp["global_rad_W"].to_numpy(), grp["Net_KWH"].to_numpy())
+        slope_m = max(0.0, -float(b_m))
+        pr_m = (slope_m * STC_FACTOR) / pv_capacity_kwp if pv_capacity_kwp > 0 else np.nan
+        pr_m = _clip_pr(pr_m)
+        if np.isfinite(pr_m):
+            month_prs[int(m)] = pr_m
+
+    if month_prs:
+        # Normalize to mean=1.0 so pr_base controls the global scale.
+        vals = np.array(list(month_prs.values()), dtype="float64")
+        mean_val = float(np.nanmean(vals)) if vals.size else np.nan
+        if np.isfinite(mean_val) and mean_val > 0:
+            for m in range(1, 13):
+                if m in month_prs:
+                    pr_by_month[m] = float(np.clip(month_prs[m] / mean_val, 0.6, 1.4))
+
+    return float(pr_base), pr_by_month
+
+
+def predict_customer_pv_15min(
+    customer_id: str,
+    pv_capacity_kwp: float,
+    avg_meteo_15min: pd.DataFrame,
+    forecast_year: int,
+    cust_history_with_meteo: Optional[pd.DataFrame] = None,
+    default_pr: float = 0.85,
+) -> pd.DataFrame:
+    """
+    Produce a full-year 15-min PV energy forecast (kWh per 15 min) for one customer.
+
+    Model:
+      pv_kwh_15min = pv_capacity_kwp * PR(customer) * PR_month(month) * (rad_Wm2 / 1000) * 0.25
+
+    Uses net-load-informed calibration if customer history is provided.
+    """
+    pv_capacity_kwp = _safe_float(pv_capacity_kwp, default=0.0)
+    if pv_capacity_kwp <= 0 or avg_meteo_15min is None or avg_meteo_15min.empty:
+        return pd.DataFrame(columns=["customer_id", "DT_UTC", "pv_forecast_kwh_15min", "global_rad_W", "pv_capacity_kwp"])
+
+    if "global_rad_W" not in avg_meteo_15min.columns:
+        raise ValueError("avg_meteo_15min must contain column 'global_rad_W'.")
+
+    pr_base, pr_by_month = _estimate_customer_pr_monthly(
+        cust_history_with_meteo if cust_history_with_meteo is not None else pd.DataFrame(),
+        pv_capacity_kwp=pv_capacity_kwp,
+        default_pr=default_pr,
+    )
+
+    idx = _year_time_index_15min(int(forecast_year))
+    met = avg_meteo_15min.reindex(idx)[["global_rad_W"]].copy()
+    met["month"] = met.index.month.astype("int8")
+    met["pr_month"] = met["month"].map(pr_by_month).astype("float32").fillna(1.0)
+
+    rad = met["global_rad_W"].astype("float32")
+    rad = rad.clip(lower=0.0)
+
+    # capacity (kWp) * (rad/1000) -> kW at PR=1. Multiply by 0.25 h for 15-min energy.
+    pv_kwh_15min = (pv_capacity_kwp * float(pr_base)) * met["pr_month"] * (rad / 1000.0) * 0.25
+    pv_kwh_15min = pv_kwh_15min.astype("float32").clip(lower=0.0)
+
+    out = pd.DataFrame(
+        {
+            "customer_id": str(customer_id),
+            "DT_UTC": met.index,
+            "pv_forecast_kwh_15min": pv_kwh_15min.to_numpy(),
+            "global_rad_W": rad.to_numpy(),
+            "pv_capacity_kwp": np.float32(pv_capacity_kwp),
+        }
+    )
+    return out
+
+
+def _forecast_open_parquet_writer(output_path: str):
+    """
+    Open a pyarrow ParquetWriter for incremental writes.
+    Returns (writer, pa) so callers can create tables without re-importing.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    # We don't know the schema until we see the first batch.
+    return None, pa, pq
+
+
+def forecast_pv_for_customers_streaming(
+    data_dir: str,
+    cust_file_index: dict,
+    prob_summary: pd.DataFrame,
+    avg_meteo_15min: pd.DataFrame,
+    forecast_year: int,
+    output_path: str,
+    batch_customers: int = 25,
+    default_pr: float = 0.85,
+    min_capacity_kwp: float = 0.1,
+) -> str:
+    """
+    Stream through customers, produce 15-min PV forecasts for *forecast_year*,
+    and write a single parquet file at *output_path*.
+
+    Memory profile: keeps at most one customer's history and a small batch of
+    forecast frames in RAM.
+    """
+    if prob_summary is None or prob_summary.empty:
+        raise ValueError("prob_summary is empty; cannot forecast.")
+    if "customer_id" not in prob_summary.columns or "pv_capacity_kwp" not in prob_summary.columns:
+        raise ValueError("prob_summary must contain 'customer_id' and 'pv_capacity_kwp'.")
+
+    df = prob_summary[["customer_id", "pv_capacity_kwp"]].copy()
+    df["pv_capacity_kwp"] = pd.to_numeric(df["pv_capacity_kwp"], errors="coerce")
+    df = df.dropna(subset=["customer_id", "pv_capacity_kwp"])
+    df = df[df["pv_capacity_kwp"] >= float(min_capacity_kwp)]
+    if df.empty:
+        raise ValueError("No customers with capacity above threshold to forecast.")
+
+    # Deterministic order for reproducibility.
+    df = df.sort_values("customer_id")
+
+    # Write incrementally to a single parquet file (keeps RAM bounded).
+    writer = None
+    pa = pq = None
+    try:
+        writer, pa, pq = _forecast_open_parquet_writer(output_path)
+    except Exception as e:
+        raise RuntimeError(
+            "Parquet writing requires pyarrow. "
+            "Install/repair pyarrow in the active environment."
+        ) from e
+
+    n_since_flush = 0
+    for _, row in df.iterrows():
+        cid = str(row["customer_id"])
+        cap = float(row["pv_capacity_kwp"])
+
+        hist = load_single_customer(cid, data_dir, cust_file_index, avg_meteo_15min)
+        try:
+            pred = predict_customer_pv_15min(
+                customer_id=cid,
+                pv_capacity_kwp=cap,
+                avg_meteo_15min=avg_meteo_15min,
+                forecast_year=int(forecast_year),
+                cust_history_with_meteo=hist if hist is not None and not hist.empty else None,
+                default_pr=default_pr,
+            )
+        finally:
+            del hist
+
+        if pred is None or pred.empty:
+            continue
+
+        table = pa.Table.from_pandas(pred, preserve_index=False)
+        if writer is None:
+            writer = pq.ParquetWriter(output_path, table.schema)
+        writer.write_table(table)
+
+        n_since_flush += 1
+        # Keep a small, tunable cadence for progress without storing batches.
+        if int(batch_customers) > 0 and n_since_flush >= int(batch_customers):
+            n_since_flush = 0
+
+    if writer is not None:
+        writer.close()
+
+    return str(output_path)
+
+
+def validate_portfolio_forecast(
+    forecast_parquet_path: str,
+    prob_summary: pd.DataFrame,
+    max_specific_yield_kwh_kwp: float = 1800.0,
+) -> dict:
+    """
+    Portfolio-level plausibility checks (lightweight).
+    Reads parquet once and compares aggregate yield against installed capacity.
+    """
+    if prob_summary is None or prob_summary.empty:
+        return {"ok": False, "reason": "empty_prob_summary"}
+    if "pv_capacity_kwp" not in prob_summary.columns:
+        return {"ok": False, "reason": "missing_capacity_column"}
+
+    total_cap = float(pd.to_numeric(prob_summary["pv_capacity_kwp"], errors="coerce").fillna(0.0).sum())
+    if total_cap <= 0:
+        return {"ok": False, "reason": "zero_total_capacity"}
+
+    df = pd.read_parquet(forecast_parquet_path, columns=["pv_forecast_kwh_15min"])
+    total_kwh = float(np.nansum(pd.to_numeric(df["pv_forecast_kwh_15min"], errors="coerce").to_numpy(dtype="float64")))
+    specific = total_kwh / total_cap
+
+    if specific > float(max_specific_yield_kwh_kwp):
+        return {
+            "ok": False,
+            "reason": "portfolio_specific_yield_too_high",
+            "portfolio_specific_yield_kwh_kwp": specific,
+            "total_capacity_kwp": total_cap,
+            "total_forecast_kwh": total_kwh,
+        }
+
+    return {
+        "ok": True,
+        "portfolio_specific_yield_kwh_kwp": specific,
+        "total_capacity_kwp": total_cap,
+        "total_forecast_kwh": total_kwh,
+    }
+
+
+def validate_customer_forecast(
+    forecast_df: pd.DataFrame,
+    pv_capacity_kwp: float,
+    max_specific_yield_kwh_kwp: float = 1800.0,
+) -> dict:
+    """
+    Lightweight plausibility checks for a single customer's forecast.
+    """
+    if forecast_df is None or forecast_df.empty:
+        return {"ok": False, "reason": "empty_forecast"}
+    if "pv_forecast_kwh_15min" not in forecast_df.columns:
+        return {"ok": False, "reason": "missing_column_pv_forecast_kwh_15min"}
+    pv = pd.to_numeric(forecast_df["pv_forecast_kwh_15min"], errors="coerce")
+    if (pv < -1e-6).any():
+        return {"ok": False, "reason": "negative_values"}
+
+    cap = _safe_float(pv_capacity_kwp, default=0.0)
+    if cap > 0:
+        annual_kwh = float(np.nansum(pv.to_numpy(dtype="float64")))
+        specific = annual_kwh / cap
+        if specific > float(max_specific_yield_kwh_kwp):
+            return {"ok": False, "reason": "specific_yield_too_high", "specific_yield_kwh_kwp": specific}
+
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # Portfolio-level aggregation
 # ---------------------------------------------------------------------------
+
+def _capacity_weighted_sc_aggregate(sc_df: pd.DataFrame) -> tuple[float, tuple[float, float], tuple[float, float]]:
+    """
+    Capacity-weighted mean of ``sc_share_mean`` and conservative / independence CIs.
+
+    Expects columns: ``pv_capacity_kwp``, ``sc_share_mean``,
+    ``sc_share_ci_lower``, ``sc_share_ci_upper``.
+    """
+    if sc_df.empty:
+        return float(np.nan), (float(np.nan), float(np.nan)), (float(np.nan), float(np.nan))
+    weights = sc_df["pv_capacity_kwp"]
+    w_sum = float(weights.sum())
+    if w_sum <= 0:
+        return float(np.nan), (float(np.nan), float(np.nan)), (float(np.nan), float(np.nan))
+
+    agg_sc = float((weights * sc_df["sc_share_mean"]).sum() / w_sum)
+    sc_lo = sc_df["sc_share_ci_lower"].fillna(sc_df["sc_share_mean"])
+    sc_hi = sc_df["sc_share_ci_upper"].fillna(sc_df["sc_share_mean"])
+    agg_sc_ci_conservative = (
+        float(np.clip((weights * sc_lo).sum() / w_sum, 0, 1)),
+        float(np.clip((weights * sc_hi).sum() / w_sum, 0, 1)),
+    )
+    sc_sigma_i = (sc_hi - sc_lo) / (2.0 * 1.96)
+    sc_sigma_agg = float(np.sqrt(((weights ** 2) * (sc_sigma_i ** 2)).sum()) / w_sum)
+    agg_sc_ci_independence = (
+        float(np.clip(agg_sc - 1.96 * sc_sigma_agg, 0, 1)),
+        float(np.clip(agg_sc + 1.96 * sc_sigma_agg, 0, 1)),
+    )
+    return agg_sc, agg_sc_ci_conservative, agg_sc_ci_independence
+
 
 def aggregate_portfolio_estimates(
     prob_summary: pd.DataFrame,
@@ -1387,6 +1961,11 @@ def aggregate_portfolio_estimates(
     Returns
     -------
     dict  with keys documented inline.
+
+    Self-consumption aggregates use capacity weights among hybrid-PV-positive
+    customers. When ``sc_share_mean`` is present, ``aggregate_sc_share_nonzero_sc``
+    repeats the same weighting over rows with ``sc_share_mean > 0`` only
+    (``n_customers_nonzero_sc`` is the count of those customers).
     """
     if prob_summary.empty:
         return {}
@@ -1422,32 +2001,13 @@ def aggregate_portfolio_estimates(
 
     # ---- Aggregate self-consumption share (capacity-weighted mean) ----
     sc_valid = df_valid.dropna(subset=["sc_share_mean"])
-    weights = sc_valid["pv_capacity_kwp"]
-    w_sum = weights.sum()
+    agg_sc, agg_sc_ci_conservative, agg_sc_ci_independence = _capacity_weighted_sc_aggregate(
+        sc_valid
+    )
 
-    if w_sum > 0 and not sc_valid.empty:
-        agg_sc = float((weights * sc_valid["sc_share_mean"]).sum() / w_sum)
-
-        # SC CI -- conservative (capacity-weighted mean of CI endpoints)
-        sc_lo = sc_valid["sc_share_ci_lower"].fillna(sc_valid["sc_share_mean"])
-        sc_hi = sc_valid["sc_share_ci_upper"].fillna(sc_valid["sc_share_mean"])
-        agg_sc_ci_conservative = (
-            float(np.clip((weights * sc_lo).sum() / w_sum, 0, 1)),
-            float(np.clip((weights * sc_hi).sum() / w_sum, 0, 1)),
-        )
-
-        # SC CI -- independence (delta method for weighted mean)
-        sc_sigma_i = (sc_hi - sc_lo) / (2.0 * 1.96)
-        # Var(weighted_mean) = sum(w_i^2 * sigma_i^2) / (sum(w_i))^2
-        sc_sigma_agg = float(np.sqrt(((weights ** 2) * (sc_sigma_i ** 2)).sum()) / w_sum)
-        agg_sc_ci_independence = (
-            float(np.clip(agg_sc - 1.96 * sc_sigma_agg, 0, 1)),
-            float(np.clip(agg_sc + 1.96 * sc_sigma_agg, 0, 1)),
-        )
-    else:
-        agg_sc = np.nan
-        agg_sc_ci_conservative = (np.nan, np.nan)
-        agg_sc_ci_independence = (np.nan, np.nan)
+    sc_nonzero = sc_valid[sc_valid["sc_share_mean"] > 0]
+    n_nonzero_sc = int(len(sc_nonzero))
+    agg_sc_nz, agg_sc_ci_con_nz, agg_sc_ci_ind_nz = _capacity_weighted_sc_aggregate(sc_nonzero)
 
     # ---- Diagnostic ratio ----
     portfolio_f2r = total_floor / total_regression if total_regression > 0 else np.nan
@@ -1485,6 +2045,10 @@ def aggregate_portfolio_estimates(
         "aggregate_sc_share": agg_sc,
         "aggregate_sc_ci_conservative": agg_sc_ci_conservative,
         "aggregate_sc_ci_independence": agg_sc_ci_independence,
+        "aggregate_sc_share_nonzero_sc": agg_sc_nz,
+        "aggregate_sc_ci_conservative_nonzero_sc": agg_sc_ci_con_nz,
+        "aggregate_sc_ci_independence_nonzero_sc": agg_sc_ci_ind_nz,
+        "n_customers_nonzero_sc": n_nonzero_sc,
         "portfolio_floor_to_reg_ratio": portfolio_f2r,
         "capacity_stats": capacity_stats,
         **yearly_totals,
@@ -1544,7 +2108,9 @@ def validate_yield_plausibility(
 def load_customer_metadata(data_dir: Optional[str] = None) -> Optional[pd.DataFrame]:
     """
     Load the Romande Energie customer metadata parquet (contains segment info).
-    Returns DataFrame with at least columns [ID, customer_type] or None.
+
+    Typical columns include ``ID`` and ``TYPE_PARTENAIRE_LIBELLE`` (e.g. value
+    ``"Particuliers"``). Returns None if the file is missing or unreadable.
     """
     if data_dir is None:
         data_dir = str(Path(__file__).resolve().parent.parent / "data" / "re_data" / "ETHZ")
@@ -1558,6 +2124,52 @@ def load_customer_metadata(data_dir: Optional[str] = None) -> Optional[pd.DataFr
         return meta
     except Exception:
         return None
+
+
+PARTICULIERS_PARTNER_LABEL = "Particuliers"
+
+
+def particuliers_customer_ids(metadata: pd.DataFrame) -> Set[str]:
+    """
+    Return customer IDs whose partner type is Romande Energie *Particuliers*.
+
+    Uses column ``TYPE_PARTENAIRE_LIBELLE`` and exact label *Particuliers*
+    (see ``PARTICULIERS_PARTNER_LABEL``, aligned with ``data/fast_load_smart_meter.py``).
+    """
+    if metadata is None or metadata.empty:
+        raise ValueError("metadata is empty or None; cannot resolve Particuliers IDs.")
+    if "ID" not in metadata.columns:
+        raise ValueError(
+            f"metadata has no 'ID' column; columns={sorted(map(str, metadata.columns))}"
+        )
+    col = "TYPE_PARTENAIRE_LIBELLE"
+    if col not in metadata.columns:
+        raise ValueError(
+            f"metadata has no {col!r} column (needed for Particuliers filter); "
+            f"columns={sorted(map(str, metadata.columns))}"
+        )
+    sub = metadata.loc[metadata[col] == PARTICULIERS_PARTNER_LABEL, "ID"].astype(str)
+    return set(sub.unique())
+
+
+def eligible_pv_customer_ids(
+    customer_summary: pd.DataFrame,
+    particulier_ids: Set[str],
+    max_cons_kwh: float = 100_000,
+) -> Tuple[pd.DataFrame, Set[str]]:
+    """
+    Restrict *customer_summary* to Particuliers with total consumption <= cap.
+
+    Returns a filtered copy of *customer_summary* and the set of eligible IDs.
+    """
+    if customer_summary is None or customer_summary.empty:
+        return customer_summary, set()
+    if "ID" not in customer_summary.columns or "sum_cons_kwh" not in customer_summary.columns:
+        raise ValueError("customer_summary must contain 'ID' and 'sum_cons_kwh'.")
+    cons_ok = customer_summary["sum_cons_kwh"] <= float(max_cons_kwh)
+    ids = set(customer_summary.loc[cons_ok, "ID"].astype(str)) & set(particulier_ids)
+    filtered = customer_summary.loc[customer_summary["ID"].astype(str).isin(ids)].copy()
+    return filtered, ids
 
 
 def compute_segment_stats(
@@ -1782,21 +2394,217 @@ def print_evaluation_report(evaluation: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Streaming PV indicator computation
+# ---------------------------------------------------------------------------
+
+def stream_pv_indicators(
+    data_dir: str,
+    target_ids: set,
+    avg_meteo_15min: pd.DataFrame,
+    daily_weather: pd.DataFrame,
+    cust_file_index: Optional[dict] = None,
+) -> pd.DataFrame:
+    """
+    Stream through parquet files to compute PV indicators for *target_ids*
+    without loading the full dataset into memory.
+
+    Single-file customers (98%+) are processed immediately per file.
+    Multi-file customers are accumulated and processed at the end.
+
+    Parameters
+    ----------
+    data_dir : str
+        Path to the directory containing the parquet files.
+    target_ids : set[str]
+        Customer IDs to process (e.g. from stream_customer_summary).
+    avg_meteo_15min : DataFrame
+        Regional meteo time series at 15-min resolution.
+    daily_weather : DataFrame
+        Pre-computed daily weather with rad_bucket (from compute_daily_weather).
+    cust_file_index : dict, optional
+        {customer_id: [file_paths]} mapping.  Built automatically if not given.
+
+    Returns
+    -------
+    pv_indicators : DataFrame
+    """
+    if cust_file_index is None:
+        cust_file_index = build_customer_file_index(data_dir)
+
+    meteo_for_merge = _build_meteo_merge_frame(avg_meteo_15min)
+
+    single_file_cids = {
+        c for c in target_ids
+        if len(cust_file_index.get(c, [])) == 1
+    }
+    multi_file_cids = {
+        c for c in target_ids
+        if len(cust_file_index.get(c, [])) > 1
+    }
+
+    all_indicator_dfs: list[pd.DataFrame] = []
+    multi_file_accum: dict[str, list[pd.DataFrame]] = {
+        c: [] for c in multi_file_cids
+    }
+
+    files = re_data.get_parquet_files(data_dir)
+    _iter = tqdm(files, desc="Computing indicators") if _HAS_TQDM else files
+
+    for fpath in _iter:
+        df = _prepare_raw_file(fpath, meteo_for_merge, target_ids)
+        if df.empty:
+            continue
+
+        file_ids = set(df["ID"].unique())
+
+        singles_here = file_ids & single_file_cids
+        if singles_here:
+            batch_df = df[df["ID"].isin(singles_here)]
+            batch_daily = build_customer_daily_features(batch_df, daily_weather)
+            if not batch_daily.empty:
+                batch_ind = compute_pv_indicators(batch_daily, batch_df)
+                if not batch_ind.empty:
+                    all_indicator_dfs.append(batch_ind)
+
+        multis_here = file_ids & multi_file_cids
+        for cid in multis_here:
+            chunk = df[df["ID"] == cid]
+            if not chunk.empty:
+                multi_file_accum[cid].append(chunk.copy())
+
+        del df
+
+    if multi_file_cids:
+        multi_chunks = []
+        for cid, chunks in multi_file_accum.items():
+            if chunks:
+                multi_chunks.append(pd.concat(chunks, ignore_index=True))
+        del multi_file_accum
+
+        if multi_chunks:
+            multi_df = pd.concat(multi_chunks, ignore_index=True)
+            del multi_chunks
+            multi_daily = build_customer_daily_features(multi_df, daily_weather)
+            if not multi_daily.empty:
+                multi_ind = compute_pv_indicators(multi_daily, multi_df)
+                if not multi_ind.empty:
+                    all_indicator_dfs.append(multi_ind)
+            del multi_df
+
+    if all_indicator_dfs:
+        return pd.concat(all_indicator_dfs, ignore_index=True)
+    return pd.DataFrame()
+
+
+def load_single_customer(
+    customer_id: str,
+    data_dir: str,
+    cust_file_index: dict,
+    avg_meteo_15min: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Load one customer's 15-min data with meteo merged (for plotting).
+    Only reads the file(s) that contain this customer.
+    """
+    files = cust_file_index.get(customer_id, [])
+    if not files:
+        return pd.DataFrame()
+
+    meteo_for_merge = _build_meteo_merge_frame(avg_meteo_15min)
+    chunks = []
+    for fpath in files:
+        try:
+            df = pd.read_parquet(fpath)
+            df["ID"] = df["ID"].astype(str)
+            chunk = df.loc[df["ID"] == customer_id].copy()
+            del df
+            if chunk.empty:
+                continue
+            dt = pd.to_datetime(chunk["DT_UTC"], utc=True)
+            chunk["DT_UTC"] = dt.dt.tz_convert(None)
+            for col in ("CONSO_KWH", "PROD_KWH"):
+                if col in chunk.columns:
+                    chunk[col] = chunk[col].astype("float32")
+            chunk = chunk.merge(meteo_for_merge, on="DT_UTC", how="left")
+            chunks.append(chunk)
+        except Exception:
+            continue
+
+    if not chunks:
+        return pd.DataFrame()
+    return pd.concat(chunks, ignore_index=True).sort_values("DT_UTC")
+
+
+def stream_portfolio_aggregate_load(
+    data_dir: str,
+    cust_file_index: dict,
+    avg_meteo_15min: pd.DataFrame,
+    pv_customer_ids: set,
+    resolution: str = "D",
+) -> pd.DataFrame:
+    """
+    Compute aggregate (summed) load profile across PV customers by streaming
+    through files one at a time.  Returns a DataFrame indexed by timestamp
+    with columns [Import_kW, Export_kW, Net_kW].
+    """
+    meteo_for_merge = _build_meteo_merge_frame(avg_meteo_15min)
+    files = re_data.get_parquet_files(data_dir)
+
+    agg_series: Optional[pd.DataFrame] = None
+
+    _iter = tqdm(files, desc="Aggregating load") if _HAS_TQDM else files
+    for fpath in _iter:
+        df = _prepare_raw_file(fpath, meteo_for_merge, pv_customer_ids)
+        if df.empty:
+            continue
+
+        df["Import_kW"] = df["CONSO_KWH"] * 4.0
+        df["Export_kW"] = df["PROD_KWH"] * 4.0
+
+        file_agg = (
+            df.set_index("DT_UTC")
+            .groupby(level=0)[["Import_kW", "Export_kW"]]
+            .sum()
+        )
+        if agg_series is None:
+            agg_series = file_agg
+        else:
+            agg_series = agg_series.add(file_agg, fill_value=0)
+        del df
+
+    if agg_series is None:
+        return pd.DataFrame()
+
+    agg = agg_series.resample(resolution).mean()
+    agg["Net_kW"] = agg["Import_kW"] - agg["Export_kW"]
+    return agg
+
+
+# ---------------------------------------------------------------------------
 # Streaming data loader (section 5b of plan)
 # ---------------------------------------------------------------------------
 
-def _build_customer_file_index(data_dir: str) -> dict:
+def build_customer_file_index(
+    data_dir: str,
+    restrict_to_ids: Optional[Set[str]] = None,
+) -> dict:
     """
-    First pass: build {customer_id: [file_paths]} index.
+    Build {customer_id: [file_paths]} index by scanning ID columns.
     Most customers appear in 1 file (median=1, max~3).
+
+    If *restrict_to_ids* is set, only those customer IDs are kept in the map
+    (files are still scanned, but the dict stays small for downstream steps).
     """
     from collections import defaultdict
     files = re_data.get_parquet_files(data_dir)
     cust_to_files: dict[str, list] = defaultdict(list)
+    restrict = restrict_to_ids
     for fpath in files:
         try:
             df = pd.read_parquet(fpath, columns=["ID"])
             for cid in df["ID"].astype(str).unique():
+                if restrict is not None and cid not in restrict:
+                    continue
                 cust_to_files[cid].append(fpath)
         except Exception:
             continue
@@ -1811,18 +2619,30 @@ def process_customers_streaming(
     max_workers: int = 4,
     batch_size: int = 500,
     random_state: int = 0,
+    daily_weather: Optional[pd.DataFrame] = None,
+    cust_file_index: Optional[dict] = None,
+    autosave_enabled: bool = False,
+    autosave_path: Optional[str] = None,
+    autosave_every_customers: int = 500,
+    resume_from_autosave: bool = False,
+    resume_from_file: Optional[str] = None,
+    overwrite_autosave: bool = True,
 ) -> pd.DataFrame:
     """
     Stream-process customers file-by-file instead of loading all into RAM.
 
     Two-pass approach:
-      1. Build ID→files index (lightweight, columns=["ID"] only)
+      1. Build ID->files index (lightweight, columns=["ID"] only)
       2. Process file-by-file; single-file customers immediately,
          multi-file customers accumulated and processed after last file.
     """
-    cust_file_index = _build_customer_file_index(data_dir)
+    if cust_file_index is None:
+        cust_file_index = build_customer_file_index(data_dir)
     if not cust_file_index:
         return pd.DataFrame()
+
+    if daily_weather is None:
+        daily_weather = compute_daily_weather(avg_meteo_15min)
 
     indicator_ids = set(pv_indicators["customer_id"].unique())
     relevant_cids = [c for c in cust_file_index if c in indicator_ids]
@@ -1833,49 +2653,180 @@ def process_customers_streaming(
     single_file_cids = [c for c in relevant_cids if len(cust_file_index[c]) == 1]
     multi_file_cids = [c for c in relevant_cids if len(cust_file_index[c]) > 1]
 
-    all_rows: list[dict] = []
-    total = len(relevant_cids)
-    processed = 0
+    # -------------------------------
+    # Autosave / resume configuration
+    # -------------------------------
+    if autosave_path is None:
+        autosave_path = str(Path(data_dir) / "capacity_autosave.parquet")
+    autosave_path = str(autosave_path)
+    autosave_state_path = autosave_path + ".state.json"
 
-    # Prepare meteo merge frame
-    merge_cols = ["global_rad_W"]
-    if "t_2m_C" in avg_meteo_15min.columns:
-        merge_cols.append("t_2m_C")
-    meteo_for_merge = (
-        avg_meteo_15min[merge_cols]
-        .rename_axis("DT_UTC")
-        .reset_index()
-    )
+    processed_ids: set[str] = set()
+    all_rows: list[dict] = []
+    last_autosave_n: int = 0
+
+    if autosave_enabled and not resume_from_autosave and overwrite_autosave:
+        # Start fresh and overwrite any previous autosave artifacts.
+        try:
+            Path(autosave_path).unlink(missing_ok=True)
+        except TypeError:
+            # Python < 3.8 compatibility: missing_ok not available
+            p = Path(autosave_path)
+            if p.exists():
+                p.unlink()
+        try:
+            Path(autosave_state_path).unlink(missing_ok=True)
+        except TypeError:
+            p = Path(autosave_state_path)
+            if p.exists():
+                p.unlink()
+
+    if autosave_enabled and resume_from_autosave:
+        p = Path(autosave_path)
+        parquet_processed_ids: set[str] = set()
+        if p.exists():
+            try:
+                prev = pd.read_parquet(p)
+                if not prev.empty and "customer_id" in prev.columns:
+                    processed_ids = set(prev["customer_id"].astype(str).unique())
+                    all_rows = prev.to_dict(orient="records")
+            except Exception:
+                # If autosave can't be read, we fall back to starting from scratch.
+                processed_ids = set()
+                all_rows = []
+        sp = Path(autosave_state_path)
+        if sp.exists():
+            try:
+                state = json.loads(sp.read_text())
+                state_ids = set(state.get("processed_ids", list(processed_ids)))
+                if parquet_processed_ids and len(parquet_processed_ids) >= len(state_ids):
+                    processed_ids = parquet_processed_ids
+                else:
+                    processed_ids = state_ids
+                last_autosave_n = max(
+                    int(state.get("processed_n", 0)),
+                    len(processed_ids),
+                )
+            except Exception:
+                pass
+
+    total = len(relevant_cids)
+    processed = len(processed_ids)
+    if last_autosave_n <= 0:
+        last_autosave_n = processed
+
+    meteo_for_merge = _build_meteo_merge_frame(avg_meteo_15min)
+
+    def _maybe_autosave():
+        if not autosave_enabled:
+            return
+        if autosave_every_customers <= 0:
+            return
+        if processed <= 0:
+            return
+        # Save when we advanced by at least autosave_every_customers since last save.
+        nonlocal last_autosave_n
+        if processed < (last_autosave_n + autosave_every_customers):
+            return
+        try:
+            df_out = pd.DataFrame(all_rows)
+            df_out.to_parquet(autosave_path, index=False)
+            state = {
+                "processed_ids": sorted(list(processed_ids)),
+                "processed_n": int(processed),
+            }
+            Path(autosave_state_path).write_text(json.dumps(state))
+            last_autosave_n = processed
+        except Exception:
+            # Autosave failure should not kill the run.
+            pass
 
     def _merge_and_features(raw_df: pd.DataFrame) -> tuple:
         """Merge meteo and build daily features for a batch of customers."""
         raw_df = raw_df.copy()
         dt = pd.to_datetime(raw_df["DT_UTC"], utc=True)
         raw_df["DT_UTC"] = dt.dt.tz_convert(None)
+        for col in ("CONSO_KWH", "PROD_KWH"):
+            if col in raw_df.columns:
+                raw_df[col] = raw_df[col].astype("float32")
         merged = raw_df.merge(meteo_for_merge, on="DT_UTC", how="left")
-        daily, _ = build_daily_features(avg_meteo_15min, merged)
+        daily = build_customer_daily_features(merged, daily_weather)
         return merged, daily
+
+    requested_workers = int(max_workers) if max_workers is not None else 1
+    if requested_workers < 1:
+        requested_workers = 1
+    cpu_total = os.cpu_count() or 1
+    effective_max_workers = min(requested_workers, max(1, cpu_total - 1), 4)
+    effective_batch_size = max(1, int(batch_size) if batch_size is not None else 1)
+
+    def _process_one_customer(
+        cid: str,
+        grouped_re,
+        grouped_daily,
+        seed: int,
+    ):
+        if cid not in prob_lookup.index:
+            return None
+        try:
+            cust_df = grouped_re.get_group(cid)
+            cust_days = grouped_daily.get_group(cid)
+        except KeyError:
+            return None
+        has_pv_prob = float(prob_lookup.loc[cid].get("has_pv_prob", 1.0))
+        return _process_single_customer(
+            cid, has_pv_prob, cust_df, cust_days, n_bootstrap, seed,
+        )
+
+    def _chunk_list(items: list[str], chunk_size: int) -> list[list[str]]:
+        return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
 
     def _process_batch(cids: list, merged: pd.DataFrame, daily: pd.DataFrame):
         grouped_re = merged.groupby("ID")
         grouped_daily = daily.groupby("ID")
         batch_rows = []
-        for cid in cids:
-            try:
-                cust_df = grouped_re.get_group(cid)
-                cust_days = grouped_daily.get_group(cid)
-            except KeyError:
+        for cid_chunk in _chunk_list(list(cids), effective_batch_size):
+            seeds = {
+                cid: int(base_rng.integers(0, 1_000_000))
+                for cid in cid_chunk
+            }
+            if effective_max_workers <= 1 or len(cid_chunk) == 1:
+                for cid in cid_chunk:
+                    res = _process_one_customer(cid, grouped_re, grouped_daily, seeds[cid])
+                    if res is not None:
+                        batch_rows.append(res)
                 continue
-            if cid not in prob_lookup.index:
-                continue
-            has_pv_prob = float(prob_lookup.loc[cid].get("has_pv_prob", 1.0))
-            seed = int(base_rng.integers(0, 1_000_000))
-            res = _process_single_customer(
-                cid, has_pv_prob, cust_df, cust_days, n_bootstrap, seed,
-            )
-            if res is not None:
-                batch_rows.append(res)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(effective_max_workers, len(cid_chunk))
+            ) as executor:
+                futures_map = {
+                    executor.submit(
+                        _process_one_customer,
+                        cid,
+                        grouped_re,
+                        grouped_daily,
+                        seeds[cid],
+                    ): cid
+                    for cid in cid_chunk
+                }
+                for future in concurrent.futures.as_completed(futures_map):
+                    try:
+                        res = future.result()
+                        if res is not None:
+                            batch_rows.append(res)
+                    except Exception as e:
+                        print(f"\nCustomer {futures_map[future]} failed: {e}")
         return batch_rows
+
+    print(
+        "Streaming capacity settings: "
+        f"workers={effective_max_workers} "
+        f"(requested={requested_workers}, cpu={cpu_total}), "
+        f"batch_size={effective_batch_size}, "
+        f"autosave_every={autosave_every_customers}, "
+        f"n_bootstrap={n_bootstrap}"
+    )
 
     # Process single-file customers in batches by source file
     file_to_single = {}
@@ -1883,60 +2834,100 @@ def process_customers_streaming(
         fpath = cust_file_index[cid][0]
         file_to_single.setdefault(fpath, []).append(cid)
 
-    for fpath, cids_in_file in file_to_single.items():
+    # Deterministic processing order (important for resume_from_file)
+    file_items = sorted(file_to_single.items(), key=lambda x: x[0])
+    if resume_from_file is not None:
+        # Skip until we reach the specified file path.
+        # Accept either basename or full path.
+        resume_key = resume_from_file
+        started = False
+        filtered_items = []
+        for fpath, cids_in_file in file_items:
+            if started:
+                filtered_items.append((fpath, cids_in_file))
+                continue
+            if fpath == resume_key or Path(fpath).name == Path(resume_key).name:
+                started = True
+                filtered_items.append((fpath, cids_in_file))
+        file_items = filtered_items if started else file_items
+
+    for fpath, cids_in_file in file_items:
         try:
             raw = re_data.load_customer_data(fpath)
             if raw.empty:
                 continue
             raw["ID"] = raw["ID"].astype(str)
+            # Skip customers already processed (resume)
+            cids_in_file = [c for c in cids_in_file if c not in processed_ids]
+            if not cids_in_file:
+                continue
             raw = raw[raw["ID"].isin(cids_in_file)]
             if raw.empty:
                 continue
             merged, daily = _merge_and_features(raw)
             rows = _process_batch(cids_in_file, merged, daily)
             all_rows.extend(rows)
-            processed += len(cids_in_file)
+            for r in rows:
+                cid = str(r.get("customer_id"))
+                if cid:
+                    processed_ids.add(cid)
+            processed = len(processed_ids)
+            _maybe_autosave()
             if _HAS_TQDM:
                 print(f"\r  Streaming: {processed}/{total} customers processed", end="", flush=True)
         except Exception as e:
             print(f"\nError processing file {fpath}: {e}")
 
-    # Process multi-file customers: accumulate across files, then process
+    # Process multi-file customers (load 2-3 files per customer, resume-friendly)
     if multi_file_cids:
-        multi_accum: dict[str, list] = {c: [] for c in multi_file_cids}
-        all_multi_files = set()
-        for c in multi_file_cids:
-            all_multi_files.update(cust_file_index[c])
-
-        for fpath in all_multi_files:
+        for cid in sorted(multi_file_cids):
+            cid = str(cid)
+            if cid in processed_ids:
+                continue
             try:
-                raw = re_data.load_customer_data(fpath)
-                if raw.empty:
+                file_list = cust_file_index.get(cid, [])
+                if not file_list:
                     continue
-                raw["ID"] = raw["ID"].astype(str)
-                for cid in multi_file_cids:
+                chunks = []
+                for fpath in file_list:
+                    raw = re_data.load_customer_data(fpath)
+                    if raw.empty:
+                        continue
+                    raw["ID"] = raw["ID"].astype(str)
                     chunk = raw[raw["ID"] == cid]
                     if not chunk.empty:
-                        multi_accum[cid].append(chunk)
-            except Exception:
-                continue
-
-        for cid, chunks in multi_accum.items():
-            if not chunks:
-                continue
-            combined = pd.concat(chunks, ignore_index=True)
-            try:
+                        chunks.append(chunk)
+                if not chunks:
+                    continue
+                combined = pd.concat(chunks, ignore_index=True)
                 merged, daily = _merge_and_features(combined)
                 rows = _process_batch([cid], merged, daily)
                 all_rows.extend(rows)
+                for r in rows:
+                    ccid = str(r.get("customer_id"))
+                    if ccid:
+                        processed_ids.add(ccid)
+                processed = len(processed_ids)
+                _maybe_autosave()
             except Exception as e:
                 print(f"\nError processing multi-file customer {cid}: {e}")
-            processed += 1
 
     if _HAS_TQDM:
         print(f"\r  Streaming: {processed}/{total} customers processed. Done.")
 
-    return pd.DataFrame(all_rows)
+    out = pd.DataFrame(all_rows)
+    if autosave_enabled:
+        try:
+            out.to_parquet(autosave_path, index=False)
+            state = {
+                "processed_ids": sorted(list(processed_ids)),
+                "processed_n": int(processed),
+                "completed": True,
+            }
+            Path(autosave_state_path).write_text(json.dumps(state))
+        except Exception:
+            pass
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2001,19 +2992,76 @@ def plot_portfolio_aggregate_load(
     return fig
 
 
+def plot_portfolio_aggregate_load_streaming(
+    data_dir: str,
+    cust_file_index: dict,
+    avg_meteo_15min: pd.DataFrame,
+    prob_summary: pd.DataFrame,
+    resolution: str = "D",
+    show: bool = True,
+    save_dir: Optional[Union[str, Path]] = None,
+) -> go.Figure:
+    """
+    Streaming version of plot_portfolio_aggregate_load: loads one file at a
+    time so the full dataset never needs to be in memory.
+    """
+    pv_ids = set(prob_summary["customer_id"].dropna())
+    agg = stream_portfolio_aggregate_load(
+        data_dir, cust_file_index, avg_meteo_15min, pv_ids, resolution,
+    )
+    if agg.empty:
+        raise ValueError("No matching customer data found.")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scattergl(
+        x=agg.index, y=agg["Import_kW"],
+        mode="lines", name="Aggregate Import (kW)",
+        line=dict(color="crimson", width=1.5),
+    ))
+    fig.add_trace(go.Scattergl(
+        x=agg.index, y=agg["Export_kW"],
+        mode="lines", name="Aggregate Export (kW)",
+        line=dict(color="royalblue", width=1.5),
+        fill="tozeroy", fillcolor="rgba(65,105,225,0.15)",
+    ))
+    fig.add_trace(go.Scattergl(
+        x=agg.index, y=agg["Net_kW"],
+        mode="lines", name="Net Load (kW)",
+        line=dict(color="grey", width=1, dash="dot"),
+    ))
+
+    res_label = {"D": "Daily", "W": "Weekly", "h": "Hourly"}.get(resolution, resolution)
+    fig.update_layout(
+        title=f"Portfolio Aggregate Load Profile ({res_label} avg, {len(pv_ids)} customers)",
+        xaxis_title="Time (UTC)",
+        yaxis_title="Power (kW)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=60, r=40, t=80, b=40),
+        hovermode="x unified",
+        template="plotly_white",
+    )
+    if save_dir:
+        write_plotly_figures_to_dir({"portfolio_aggregate_load": fig}, save_dir)
+    if show:
+        fig.show()
+    return fig
+
+
 def plot_portfolio_pv_capacity(
     prob_summary: pd.DataFrame,
     portfolio_agg: dict,
     show: bool = True,
+    save_dir: Optional[Union[str, Path]] = None,
 ) -> dict:
     """
     Multi-figure portfolio capacity visualisation.
 
     Returns a dict with keys:
       * ``capacity_histogram`` -- distribution of individual kWp estimates
-      * ``total_capacity_bar`` -- total portfolio kWp with dual CI bands
-                                  and regression/floor breakdown
-      * ``sc_share_bar``       -- aggregate self-consumption share with CIs
+      * ``total_capacity_bar`` -- hybrid portfolio total kWp with conservative
+                                  (robust) 95% CI
+      * ``sc_share_bar``              -- aggregate self-consumption share with CIs
+      * ``sc_share_bar_nonzero_sc``   -- same, excluding customers with ``sc_share_mean`` 0
     """
     figs: dict[str, go.Figure] = {}
 
@@ -2060,63 +3108,68 @@ def plot_portfolio_pv_capacity(
     figs["capacity_histogram"] = fig_hist
 
     # ================================================================
-    # Panel B: Total portfolio capacity with CI bands and breakdown
+    # Panel B: Hybrid portfolio total with conservative (robust) CI only
     # ================================================================
     total_h = portfolio_agg["total_hybrid_kwp"]
-    total_r = portfolio_agg["total_regression_kwp"]
-    total_f = portfolio_agg["total_floor_kwp"]
     ci_con = portfolio_agg["ci_conservative"]
-    ci_ind = portfolio_agg["ci_independence"]
 
     fig_bar = go.Figure()
 
-    categories = ["Hybrid (portfolio)", "Regression-only", "Physical Floor"]
-    values = [total_h, total_r, total_f]
-    colors = ["seagreen", "teal", "orange"]
-
-    # Error bars only on the hybrid bar (independence CI)
-    err_plus = [ci_ind[1] - total_h, 0, 0]
-    err_minus = [total_h - ci_ind[0], 0, 0]
+    err_plus = ci_con[1] - total_h
+    err_minus = total_h - ci_con[0]
 
     fig_bar.add_trace(go.Bar(
-        x=categories, y=values,
-        marker_color=colors,
+        x=["Hybrid forecast"],
+        y=[total_h],
+        width=0.42,
+        marker=dict(color="#2E7D32", line=dict(color="white", width=1)),
         error_y=dict(
             type="data",
             symmetric=False,
-            array=err_plus,
-            arrayminus=err_minus,
-            color="darkgreen",
-            thickness=2,
-            width=6,
+            array=[err_plus],
+            arrayminus=[err_minus],
+            color="#1B5E20",
+            thickness=2.2,
+            width=8,
         ),
-        text=[f"{v:.0f} kWp" for v in values],
+        text=[f"{total_h:.0f} kWp"],
         textposition="outside",
-        name="Point estimate",
-    ))
-
-    # Add the conservative CI as a wider semi-transparent error overlay
-    fig_bar.add_trace(go.Scatter(
-        x=["Hybrid (portfolio)", "Hybrid (portfolio)"],
-        y=[ci_con[0], ci_con[1]],
-        mode="markers+lines",
-        marker=dict(symbol="line-ew-open", size=14, color="darkgreen", line_width=2),
-        line=dict(color="darkgreen", width=1.5, dash="dash"),
-        name=f"Conservative 95% CI [{ci_con[0]:.0f}, {ci_con[1]:.0f}]",
-        showlegend=True,
+        textfont=dict(size=13, color="#1B1B1B"),
+        name="Portfolio total",
+        showlegend=False,
     ))
 
     fig_bar.update_layout(
-        title=(
-            f"Total Portfolio PV Capacity: {total_h:.0f} kWp"
-            f"<br><sup>{portfolio_agg['n_customers']} customers | "
-            f"Indep. CI [{ci_ind[0]:.0f}, {ci_ind[1]:.0f}] | "
-            f"Conserv. CI [{ci_con[0]:.0f}, {ci_con[1]:.0f}]</sup>"
+        title=dict(
+            text=(
+                f"<b>Total portfolio PV capacity</b>: {total_h:,.0f} kWp"
+                f"<br><sup>{portfolio_agg['n_customers']:,} customers · "
+                f"Robust 95% CI [{ci_con[0]:,.0f}, {ci_con[1]:,.0f}] kWp</sup>"
+            ),
+            font=dict(family="Arial, sans-serif", size=15, color="#1B1B1B"),
         ),
-        yaxis_title="Total Capacity (kWp)",
+        yaxis=dict(
+            title=dict(text="Total capacity (kWp)", font=dict(size=13)),
+            gridcolor="rgba(0,0,0,0.08)",
+            zeroline=False,
+            showline=True,
+            linecolor="rgba(0,0,0,0.25)",
+            mirror=False,
+            tickfont=dict(size=11),
+        ),
+        xaxis=dict(
+            title="",
+            tickfont=dict(size=12),
+            showline=True,
+            linecolor="rgba(0,0,0,0.25)",
+        ),
+        bargap=0.55,
         template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        showlegend=True,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin=dict(l=56, r=28, t=88, b=56),
+        font=dict(family="Arial, sans-serif", size=12, color="#333333"),
+        showlegend=False,
     )
     figs["total_capacity_bar"] = fig_bar
 
@@ -2170,6 +3223,58 @@ def plot_portfolio_pv_capacity(
         )
         figs["sc_share_bar"] = fig_sc
 
+    # ================================================================
+    # Panel D: Aggregate SC excluding customers with zero point estimate
+    # ================================================================
+    agg_sc_nz = portfolio_agg.get("aggregate_sc_share_nonzero_sc", np.nan)
+    if not np.isnan(agg_sc_nz):
+        sc_ci_con_nz = portfolio_agg["aggregate_sc_ci_conservative_nonzero_sc"]
+        sc_ci_ind_nz = portfolio_agg["aggregate_sc_ci_independence_nonzero_sc"]
+        n_nz = portfolio_agg.get("n_customers_nonzero_sc", 0)
+        n_all = portfolio_agg.get("n_customers", 0)
+
+        fig_sc_nz = go.Figure()
+        fig_sc_nz.add_trace(go.Bar(
+            x=["Self-Consumption Share"],
+            y=[agg_sc_nz],
+            marker_color="mediumpurple",
+            error_y=dict(
+                type="data",
+                symmetric=False,
+                array=[sc_ci_ind_nz[1] - agg_sc_nz],
+                arrayminus=[agg_sc_nz - sc_ci_ind_nz[0]],
+                color="indigo",
+                thickness=2,
+                width=8,
+            ),
+            text=[f"{agg_sc_nz:.1%}"],
+            textposition="outside",
+            name="Capacity-weighted mean",
+            width=0.4,
+        ))
+        fig_sc_nz.add_trace(go.Scatter(
+            x=["Self-Consumption Share", "Self-Consumption Share"],
+            y=[sc_ci_con_nz[0], sc_ci_con_nz[1]],
+            mode="markers+lines",
+            marker=dict(symbol="line-ew-open", size=14, color="indigo", line_width=2),
+            line=dict(color="indigo", width=1.5, dash="dash"),
+            name=f"Conservative 95% CI [{sc_ci_con_nz[0]:.1%}, {sc_ci_con_nz[1]:.1%}]",
+        ))
+        fig_sc_nz.update_layout(
+            title=(
+                f"Aggregate Self-Consumption Share: {agg_sc_nz:.1%}"
+                f"<br><sup>Excluding customers with zero estimated self-consumption "
+                f"({n_nz:,} of {n_all:,} hybrid-PV customers)</sup>"
+            ),
+            yaxis_title="Self-Consumption Share",
+            yaxis_range=[0, min(1.0, sc_ci_con_nz[1] + 0.15)],
+            template="plotly_white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        figs["sc_share_bar_nonzero_sc"] = fig_sc_nz
+
+    if save_dir:
+        write_plotly_figures_to_dir(figs, save_dir)
     if show:
         for fig in figs.values():
             fig.show()
@@ -2184,6 +3289,7 @@ def plot_portfolio_pv_capacity(
 def plot_evaluation_dashboard(
     evaluation: dict,
     show: bool = True,
+    save_dir: Optional[Union[str, Path]] = None,
 ) -> dict:
     """
     Multi-panel evaluation dashboard:
@@ -2288,6 +3394,8 @@ def plot_evaluation_dashboard(
             )
             figs["cross_segment"] = fig_seg
 
+    if save_dir:
+        write_plotly_figures_to_dir(figs, save_dir)
     if show:
         for fig in figs.values():
             fig.show()
@@ -2298,60 +3406,65 @@ def plot_evaluation_dashboard(
 #%%
 
 def main():
-    print("Loading data...")
+    data_dir = str(
+        Path(__file__).resolve().parent.parent / "data" / "re_data" / "ETHZ"
+    )
+
+    # Phase 0: Setup
+    print("Loading meteo data...")
     combined_meteo, avg_meteo_15min = load_meteo_data()
-    re_data_df, re_data_df_small, customer_summary = load_re_data()
-    # Filter to only the biggest 100 customers by total consumption
-    
+    print("Computing daily weather features...")
+    daily_weather = compute_daily_weather(avg_meteo_15min)
+    print("Loading customer metadata (Particuliers)...")
+    metadata = load_customer_metadata(data_dir)
+    particulier_ids = particuliers_customer_ids(metadata)
+    print(f"  {len(particulier_ids):,} Particuliers IDs in metadata")
 
-    # Downcast to save RAM
-    print("Downcasting data types...")
-    re_data_df_small["CONSO_KWH"] = pd.to_numeric(
-        re_data_df_small["CONSO_KWH"], downcast="float"
+    # Phase 1: Streaming summary + indicators
+    print("Streaming customer summary (Particuliers, <= 100 MWh total CONSO)...")
+    customer_summary, target_ids = stream_customer_summary(
+        data_dir,
+        max_cons_kwh=100_000,
+        allowed_ids=particulier_ids,
     )
-    re_data_df_small["PROD_KWH"] = pd.to_numeric(
-        re_data_df_small["PROD_KWH"], downcast="float"
-    )
-    if not avg_meteo_15min.empty and "global_rad_W" in avg_meteo_15min.columns:
-        avg_meteo_15min["global_rad_W"] = pd.to_numeric(
-            avg_meteo_15min["global_rad_W"], downcast="float"
-        )
+    print(f"  {len(customer_summary)} Particuliers in scan, {len(target_ids)} within consumption cap")
 
-    print("Aligning data and building features...")
-    meteo_window, re_data_with_meteo = align_meteo_with_re_data(
-        avg_meteo_15min, re_data_df_small
+    print("Building customer-file index (restricted to eligible IDs)...")
+    cust_file_index = build_customer_file_index(data_dir, restrict_to_ids=target_ids)
+    print(f"  {len(cust_file_index)} customers indexed")
+
+    print("Streaming PV indicators...")
+    pv_indicators = stream_pv_indicators(
+        data_dir, target_ids, avg_meteo_15min, daily_weather, cust_file_index,
     )
-    daily_features, daily_weather = build_daily_features(
-        meteo_window, re_data_with_meteo
-    )
-    
-    print("Calculating PV indicators...")
-    pv_indicators = compute_pv_indicators(daily_features, re_data_with_meteo)
     pv_indicators = classify_pv_customers(pv_indicators)
 
-    # Drop anomalies before bootstrapping
     valid_mask = (pv_indicators["DeltaProd"] >= 0) & ~(
-        (pv_indicators["yearly_prod"] > 5000) & (pv_indicators["corr_prod_rad"] < 0.4)
+        (pv_indicators["yearly_prod"] > 5000)
+        & (pv_indicators["corr_prod_rad"] < 0.4)
     )
     pv_indicators_clean = pv_indicators[valid_mask].copy()
     dropped = len(pv_indicators) - len(pv_indicators_clean)
     if dropped > 0:
-        print(f"Dropped {dropped} anomalous customers before bootstrapping.")
+        print(f"  Dropped {dropped} anomalous customers")
 
-    # Run Parallel Bootstrap
-    prob_summary = compute_probabilistic_capacity_parallel(
-        re_data_with_meteo,
-        daily_features,
+    # Phase 2: Streaming capacity estimation
+    print("Streaming capacity estimation...")
+    prob_summary = process_customers_streaming(
+        data_dir,
+        avg_meteo_15min,
         pv_indicators_clean,
         n_bootstrap=200,
-        max_workers=3, # Safely limited to 4
-        batch_size=100
+        max_workers=3,
+        batch_size=100,
+        daily_weather=daily_weather,
+        cust_file_index=cust_file_index,
     )
 
     print("Probabilistic capacity summary head:")
     print(prob_summary.head())
 
-    # --- Portfolio-level aggregation ---
+    # Portfolio-level aggregation
     print("Aggregating portfolio estimates...")
     portfolio_agg = aggregate_portfolio_estimates(prob_summary, pv_indicators_clean)
     if portfolio_agg:
@@ -2360,32 +3473,43 @@ def main():
         print(f"  Conservative 95% CI   : [{portfolio_agg['ci_conservative'][0]:.1f}, {portfolio_agg['ci_conservative'][1]:.1f}] kWp")
         print(f"  Aggregate SC share    : {portfolio_agg['aggregate_sc_share']:.1%}")
 
-    # --- Evaluation framework ---
+    # Evaluation framework
     print("Running evaluation framework...")
-    metadata = load_customer_metadata()
     evaluation = evaluate_portfolio(
-        prob_summary, pv_indicators_clean, metadata=metadata,
+        prob_summary,
+        pv_indicators_clean,
+        metadata=metadata,
+        segment_col="TYPE_PARTENAIRE_LIBELLE",
     )
     print_evaluation_report(evaluation)
 
-    # --- Plotting ---
+    # Plotting
     plot_population_statistics(pv_indicators_clean, show=True)
     plot_capacity_vs_production_with_ci(prob_summary, pv_indicators_clean, show=True)
     plot_capacity_vs_self_consumption(prob_summary, show=True)
 
     if not prob_summary.empty:
-        plot_portfolio_aggregate_load(re_data_with_meteo, prob_summary, show=True)
+        plot_portfolio_aggregate_load_streaming(
+            data_dir, cust_file_index, avg_meteo_15min,
+            prob_summary, show=True,
+        )
         if portfolio_agg:
             plot_portfolio_pv_capacity(prob_summary, portfolio_agg, show=True)
 
         plot_evaluation_dashboard(evaluation, show=True)
 
-        massive_customer_id = prob_summary.loc[prob_summary["pv_capacity_kwp"].idxmax(), "customer_id"]
-        plot_customer_capacity_validation(
-            customer_id=massive_customer_id, 
-            re_data_with_meteo=re_data_with_meteo, 
-            prob_summary=prob_summary
+        massive_customer_id = prob_summary.loc[
+            prob_summary["pv_capacity_kwp"].idxmax(), "customer_id"
+        ]
+        cust_data = load_single_customer(
+            massive_customer_id, data_dir, cust_file_index, avg_meteo_15min,
         )
+        if not cust_data.empty:
+            plot_customer_capacity_validation(
+                customer_id=massive_customer_id,
+                re_data_with_meteo=cust_data,
+                prob_summary=prob_summary,
+            )
 
 # MANDATORY MULTIPROCESSING GUARD
 if __name__ == "__main__":

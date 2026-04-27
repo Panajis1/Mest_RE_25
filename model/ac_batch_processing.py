@@ -33,22 +33,29 @@ from ac_actrainingfunctions import (
 )
 
 import sys
-sys.path.append(r"C:\Users\jiniy\Desktop\CS\Mest_RE_25\data")
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_MODEL_DIR = Path(__file__).resolve().parent
+_DATA_DIR = _REPO_ROOT / "data"
+
+for _p in [str(_MODEL_DIR), str(_DATA_DIR)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 from envdata import env_data
 
 
 # ============================================================
-# CONFIG
+# CONFIG  ← update these paths before running (will be replaced by config system)
 # ============================================================
 
-BASE_DIR = Path(r"C:\Users\jiniy\Desktop\CS")
-TRAIN_FILE = BASE_DIR / "all_sources_load_with_weather.parquet"
+TRAIN_FILE = _REPO_ROOT / "data" / "processed" / "training" / "all_sources_load_with_weather.parquet"
 
-PARQUET_DIR = Path("C:/Users/jiniy/Desktop/CS/ETHZ_ALL")
-OUTPUT_DIR = PARQUET_DIR / "ac_detection_outputs"
+PARQUET_DIR = _REPO_ROOT / "data" / "raw" / "re"
+OUTPUT_DIR = _MODEL_DIR / "ac_detection_outputs"
 
 # ── Cache File Paths ──────────────────────────────────────────
-CACHE_DIR = BASE_DIR / "ac_cache"
+CACHE_DIR = _MODEL_DIR / "ac_cache"
 MODELED_DF_CACHE    = CACHE_DIR / "modeled_df_cache.parquet"
 MODEL_CACHE         = CACHE_DIR / "ac_model.pkl"
 INFERENCE_FEAT_CACHE = CACHE_DIR / "inference_feats_cache.parquet"

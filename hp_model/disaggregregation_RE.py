@@ -4,9 +4,12 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent
+
+for _p in [str(_SCRIPT_DIR)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from disaggregation_functions import (
     ScientificTwoStageHPModel,
@@ -23,9 +26,9 @@ from disaggregation_functions import (
     summarize_external_prediction_chunks,
 )
 
-BASE_DIR = Path(r"C:\Users\Master\Documents\Mest_RE_25\hp_label")
-PV_FORECAST_DIR = BASE_DIR / "pv_forecast"
-HP_LABEL_DIR = BASE_DIR / "hp_detection_outputs"
+# ← update these paths before running (will be replaced by config system)
+PV_FORECAST_DIR = _REPO_ROOT / "data" / "processed" / "out" / "pv_forecast"
+HP_LABEL_DIR = _SCRIPT_DIR / "hp_detection_outputs"
 PREFIX = "internaldisaggregation_scidata_to_external"
 
 def infer_external_time_range(pv_forecast_dir: Path):

@@ -27,14 +27,13 @@ from datetime import datetime
 
 import pandas as pd
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent
+_DATA_DIR = _REPO_ROOT / "data"
 
-# Add data directory for envdata import
-DATA_DIR = Path(r"C:\Users\jiniy\Desktop\CS\Mest_RE_25\data")
-if str(DATA_DIR) not in sys.path:
-    sys.path.insert(0, str(DATA_DIR))
+for _p in [str(_SCRIPT_DIR), str(_DATA_DIR)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from ac_disaggregation import (
     compute_calibration_factor,
@@ -64,18 +63,12 @@ from ac_disaggregation import (
 # CONFIG  ← update these paths before running
 # ============================================================
 
-BASE_DIR       = Path(r"C:\Users\jiniy\Desktop\CS\Mest_RE_25")
-TRAIN_FILE     = Path(r"C:\Users\jiniy\Desktop\CS") / "all_sources_load_with_weather.parquet"
+# ← update these paths before running (will be replaced by config system)
+TRAIN_FILE     = _REPO_ROOT / "data" / "processed" / "training" / "all_sources_load_with_weather.parquet"
 
-# RE parquet files (same dir as used in ac_batch_processing.py)
-PARQUET_DIR    = Path(r"C:\Users\jiniy\Desktop\CS\ETHZ_ALL")
-
-# Detection output CSVs (produced by ac_batch_processing.py)
-AC_LABEL_FILE = PARQUET_DIR / "ac_detection_outputs" / "ac_labels_all_thresh66.csv"
-#AC_LABEL_DIR   = PARQUET_DIR / "ac_detection_outputs"
-
-# Where to save disaggregation prediction chunks
-OUTPUT_DIR     = PARQUET_DIR / "ac_disaggregation_outputs"
+PARQUET_DIR    = _REPO_ROOT / "data" / "raw" / "re"
+AC_LABEL_FILE  = _SCRIPT_DIR / "ac_detection_outputs" / "ac_labels_all_thresh66.csv"
+OUTPUT_DIR     = _SCRIPT_DIR / "ac_disaggregation_outputs"
 
 PREFIX         = "ac_disaggregation_re"
 
