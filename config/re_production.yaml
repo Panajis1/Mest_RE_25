@@ -1,0 +1,18 @@
+# RE production overrides — inherits all defaults from default.yaml
+# Update data paths to match your local data layout before running.
+
+data:
+  re_data_dir: "data/re_data/ETHZ_ALL"
+  metadata_dir: "data/re_data/ETHZ_ALL"
+
+pipeline:
+  n_workers: 8
+  batch_size: 1000
+  autosave_every_n_customers: 500
+
+detectors:
+  enabled:
+    - pv
+    - battery
+    - ac
+    - heat_pump

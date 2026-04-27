@@ -1,0 +1,63 @@
+data:
+  re_data_dir: "data/raw/re"
+  metadata_dir: "data/raw/re"
+  max_consumption_kwh: 100_000
+  customer_type_filter: "Particuliers"
+
+pipeline:
+  n_workers: 4
+  batch_size: 500
+  autosave_every_n_customers: 1000
+  resume_from_checkpoint: true
+  checkpoint_path: "data/processed/out/checkpoint.parquet"
+
+detectors:
+  enabled:
+    - pv
+    - battery
+    - ac
+    - heat_pump
+    - ev
+
+models:
+  pv:
+    corr_threshold: 0.3
+    delta_net_threshold: -0.1
+    min_yearly_prod_kwh: 1.0
+    capacity_bootstrap_n: 200
+    capacity_min_kwp: 0.1
+  ac:
+    prob_threshold: 0.55
+    detector_path: "models/ac_detector_v1.joblib"
+    disaggregator_path: "models/ac_disaggregator_v1.pkl"
+    inference_months: [6, 7, 8]
+  heat_pump:
+    prob_threshold: 0.5
+    detector_path: "models/hp_detector_v1.joblib"
+    disaggregator_path: "models/hp_disaggregator_v1.joblib"
+    night_rad_threshold: 20.0
+  battery:
+    dark_day_rad_max_w: 100.0
+    sunny_day_rad_min_w: 100.0
+    classification_threshold: 0.5
+    enforce_pv_required: true
+    capacity_min_kwh: 5.0
+    capacity_max_kwh: 30.0
+
+  ev:
+    prob_threshold: 0.3
+    max_yearly_mwh: 100.0
+    grid_threshold_kw: 2.8
+    min_session_steps: 6
+    max_rel_std: 0.15
+  ev_sessions:
+    step_threshold_kwh: 1.5
+    min_duration_minutes: 60
+
+forecast:
+  year: 2024
+  min_pv_capacity_kwp: 0.1
+
+output:
+  results_dir: "data/processed/out"
+  figures_dir: "docs/figures/results"
