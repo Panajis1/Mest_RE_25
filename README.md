@@ -205,6 +205,88 @@ return empty result columns; PV, PV capacity, battery, and EV can still run.
 When disaggregator artifacts are missing or skipped, scalar detection results
 are still joined.
 
+### Pipeline Flow (Detailed)
+
+```text
+scripts/run_pipeline.py
+      |
+      v
+load_config() in re_nilm/pipeline/orchestrator.py
+  - config/default.yaml
+  - config/re_production.yaml (deep-merged override)
+      |
+      v
+PipelineOrchestrator
+      |
+      +--> WeatherLoader (re_nilm/data/loaders/weather.py)
+      |      - default backend: MeteoSwiss
+      |      - cache file pattern: output.results_dir/weather_meteoswiss_<dt_start>_<dt_end>.parquet
+      |      - if weather_required=false and load fails: degraded mode with empty weather frame
+      |
+      +--> build_customer_file_index (re_nilm/pipeline/customer_index.py)
+      |      - scans data.re_data_dir/*.parquet
+      |      - expects meter columns: ID, DT_UTC, CONSO_KWH, PROD_KWH
+      |      - applies cohort filters from config:
+      |          customer_type_filter (default "Particuliers")
+      |          max_consumption_kwh (default 100_000)
+      |      - writes/reads output.results_dir/customer_file_index.json
+      |
+      +--> StreamingEngine for scalar steps (re_nilm/pipeline/streaming.py)
+      |      - batches customer_ids, optional multiprocessing
+      |      - per-step checkpoint base: <step>_ckpt.parquet
+      |      - with checkpoint_format="text" (default), append log is <step>_ckpt.txt
+      |
+      +--> STEP 1: PV detection [all filtered customers]
+      |      re_nilm/detectors/pv.py (PVDetector, heuristic)
+      |      -> pv_indicators.parquet (+ pv_indicators_ckpt.*)
+      |
+      +--> STEP 2: PV capacity [PV-positive only]
+      |      re_nilm/estimators/pv_capacity.py (PVCapacityEstimator)
+      |      -> pv_capacity.parquet (+ pv_capacity_ckpt.*)
+      |      - can be skipped via --skip-pv-capacity
+      |
+      +--> STEP 3: Battery [all filtered customers, uses pv_result + cap_result context]
+      |      re_nilm/detectors/battery.py + re_nilm/estimators/battery_capacity.py
+      |      -> battery_results.parquet (+ battery_results_ckpt.*)
+      |
+      +--> STEP 4: AC detection [all filtered customers]
+      |      re_nilm/detectors/ac.py (ACDetector.load)
+      |      requires models/ac_detector_v1.joblib (else step skipped with warning)
+      |      -> ac_detection.parquet (+ ac_detection_ckpt.*)
+      |
+      +--> STEP 5: HP detection [all filtered customers]
+      |      re_nilm/detectors/heat_pump.py (HeatPumpDetector.load)
+      |      requires models/hp_detector_v1.joblib (else step skipped with warning)
+      |      -> hp_detection.parquet (+ hp_detection_ckpt.*)
+      |
+      +--> STEP 6: EV detection [all filtered customers, heuristic]
+      |      re_nilm/detectors/ev.py (EVDetector)
+      |      -> ev_detection.parquet (+ ev_detection_ckpt.*)
+      |
+      +--> STEP 7: AC disaggregation [AC-positive only]
+      |      re_nilm/estimators/ac_disaggregation.py (ACDisaggregationEstimator.load)
+      |      requires models/ac_disaggregator_v1.pkl (else step skipped with warning)
+      |      -> ac_disagg_15min.parquet
+      |      - internally written as parts then compacted (no per-customer checkpoint)
+      |      - can be skipped via --skip-ac-disagg
+      |
+      +--> STEP 8: HP disaggregation [hp_type == "winter_hp" only]
+      |      re_nilm/estimators/hp_disaggregation.py (HPDisaggregationEstimator.load)
+      |      requires models/hp_disaggregator_v1.joblib (else step skipped with warning)
+      |      -> hp_disagg_15min.parquet
+      |      - internally written as parts then compacted (no per-customer checkpoint)
+      |      - can be skipped via --skip-hp-disagg
+      |
+      +--> STEP 9: EV sessions [EV-positive only]
+      |      re_nilm/estimators/ev_sessions.py (EVSessionEstimator)
+      |      -> ev_sessions_15min.parquet
+      |      - internally written as parts then compacted (no per-customer checkpoint)
+      |
+      +--> STEP 10: join scalar outputs (outer merge on customer_id)
+             pv_indicators + pv_capacity + battery_results + ac_detection + hp_detection + ev_detection
+             -> results_all_customers.parquet
+```
+
 ## Running the Pipeline
 
 ```bash
