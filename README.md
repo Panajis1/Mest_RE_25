@@ -9,6 +9,41 @@ The current pipeline is built for Romande Energie style parquet exports, but
 most runtime logic is configured through YAML and can be reused for another
 portfolio with the same meter schema.
 
+## Project Structure
+
+```text
+re_nilm/
+  data/
+    loaders/              # SmartMeterLoader, WeatherLoader, DataportLoader
+    preprocessing.py      # resampling and cleaning helpers
+    alignment.py          # meter/weather timestamp alignment
+  detectors/              # PV, battery, AC, heat pump, EV detectors
+  estimators/             # capacity, disaggregation, EV session estimators
+  features/               # shared load, weather, temporal feature functions
+  pipeline/
+    customer_index.py     # filtered customer_id -> parquet paths mapping
+    streaming.py          # batched checkpointed processing engine
+    orchestrator.py       # end-to-end pipeline composition
+  portfolio/              # aggregation, evaluation, forecasting helpers
+  training/               # AC and HP detector trainers
+  visualization/          # customer and portfolio plotting utilities
+
+config/
+  default.yaml            # default runtime configuration
+  re_production.yaml      # local production overrides
+
+scripts/
+  run_pipeline.py         # main pipeline CLI
+  train_models.py         # detector training CLI
+  export_figures.py       # portfolio PNG export CLI
+  validate_detectors.py   # comparison against legacy detector logic
+
+models/                   # serialized model artifacts
+data/                     # raw, processed, and output data
+docs/figures/results/     # exported PNG figures
+tests/                    # unit and integration tests
+```
+
 ## What It Does
 
 | Component | Signal used | Main outputs | Runtime dependency |
@@ -340,40 +375,6 @@ data validation utility, not a lightweight CI smoke test.
 Keep `RUN_FULL_PIPELINE = False` unless you intentionally want to launch a full
 portfolio run from the notebook.
 
-## Project Structure
-
-```text
-re_nilm/
-  data/
-    loaders/              # SmartMeterLoader, WeatherLoader, DataportLoader
-    preprocessing.py      # resampling and cleaning helpers
-    alignment.py          # meter/weather timestamp alignment
-  detectors/              # PV, battery, AC, heat pump, EV detectors
-  estimators/             # capacity, disaggregation, EV session estimators
-  features/               # shared load, weather, temporal feature functions
-  pipeline/
-    customer_index.py     # filtered customer_id -> parquet paths mapping
-    streaming.py          # batched checkpointed processing engine
-    orchestrator.py       # end-to-end pipeline composition
-  portfolio/              # aggregation, evaluation, forecasting helpers
-  training/               # AC and HP detector trainers
-  visualization/          # customer and portfolio plotting utilities
-
-config/
-  default.yaml            # default runtime configuration
-  re_production.yaml      # local production overrides
-
-scripts/
-  run_pipeline.py         # main pipeline CLI
-  train_models.py         # detector training CLI
-  export_figures.py       # portfolio PNG export CLI
-  validate_detectors.py   # comparison against legacy detector logic
-
-models/                   # serialized model artifacts
-data/                     # raw, processed, and output data
-docs/figures/results/     # exported PNG figures
-tests/                    # unit and integration tests
-```
 
 ## Troubleshooting
 
