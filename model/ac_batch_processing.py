@@ -49,9 +49,9 @@ from envdata import env_data
 # CONFIG  ← update these paths before running (will be replaced by config system)
 # ============================================================
 
-TRAIN_FILE = _REPO_ROOT / "data" / "processed" / "training" / "all_sources_load_with_weather.parquet"
+TRAIN_FILE = Path(r"C:\Users\jiniy\Desktop\CS\all_sources_load_with_weather.parquet")
 
-PARQUET_DIR = _REPO_ROOT / "data" / "raw" / "re"
+PARQUET_DIR = Path(r"C:\Users\jiniy\Desktop\CS\ETHZ_ALL")
 OUTPUT_DIR = _MODEL_DIR / "ac_detection_outputs"
 
 # ── Cache File Paths ──────────────────────────────────────────
@@ -61,9 +61,9 @@ MODEL_CACHE         = CACHE_DIR / "ac_model.pkl"
 INFERENCE_FEAT_CACHE = CACHE_DIR / "inference_feats_cache.parquet"
 
 # ── True로 바꾸면 캐시 무시하고 처음부터 재실행 ───────────── 
-FORCE_REBUILD_MODELED   = False   # build_modeled_dataset 재실행
-FORCE_REBUILD_MODEL     = False   # 모델 재학습
-FORCE_REBUILD_INFERENCE = False   # inference feature 재추출
+FORCE_REBUILD_MODELED   = True   # build_modeled_dataset 재실행
+FORCE_REBUILD_MODEL     = True   # 모델 재학습
+FORCE_REBUILD_INFERENCE = True   # inference feature 재추출
 
 # ── Threshold 스캔 범위 ─────────────────────────────────────
 THRESHOLD_SCAN = [0.65, 0.66, 0.67, 0.68, 0.69, 0.70]  # 범위 좁혀서 재스캔
@@ -173,16 +173,16 @@ def scan_thresholds(model, feats_df: pd.DataFrame):
 def load_old_training_df() -> pd.DataFrame:
     if not TRAIN_FILE.exists():
         raise FileNotFoundError(f"Training file not found: {TRAIN_FILE}")
-
-    print(f"\n[TRAIN] Reading: {TRAIN_FILE}")
-    df = pd.read_parquet(TRAIN_FILE)
-
     needed_cols = ["type", "source", "dt_utc", "glob_rad", "value_kw_mean", "id_customer", "temp"]
+    print(f"\n[TRAIN] Reading: {TRAIN_FILE}")
+    df = pd.read_parquet(TRAIN_FILE, columns=needed_cols)
+
+    
     missing = [c for c in needed_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Required columns missing: {missing}")
 
-    df = df[needed_cols].copy()
+    #df = df[needed_cols].copy()
     df = df[df["type"].isin(["AC", "TOT"])].copy()
 
     df["dt_utc"] = pd.to_datetime(df["dt_utc"], utc=True, errors="coerce")
