@@ -39,7 +39,7 @@ models:
     capacity_bootstrap_n_fast: 50
     capacity_min_kwp: 0.1
   ac:
-    prob_threshold: 0.55
+    prob_threshold: 0.7
     detector_path: "models/ac_detector_v1.joblib"
     disaggregator_path: "models/ac_disaggregator_v1.pkl"
   heat_pump:
@@ -49,13 +49,13 @@ models:
   battery:
     dark_day_rad_max_w: 100.0
     sunny_day_rad_min_w: 100.0
-    classification_threshold: 0.5
+    classification_threshold: 0.8
     enforce_pv_required: true
     capacity_min_kwh: 5.0
     capacity_max_kwh: 30.0
 
   ev:
-    prob_threshold: 0.3
+    prob_threshold: 0.8
     max_yearly_mwh: 100.0
     grid_threshold_kw: 2.8
     min_session_steps: 6
