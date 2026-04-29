@@ -56,6 +56,26 @@ The joined scalar output is written to
 `data/processed/out/results_all_customers.parquet`. Portfolio PNGs are written
 to `docs/figures/results`.
 
+## Dependency Management
+
+This repository uses a two-file policy:
+
+- `pyproject.toml` is the source of truth for package dependencies.
+- `requirements.lock` is a fully pinned, reproducible environment snapshot.
+
+Use one of these install modes:
+
+```bash
+# Standard development install (recommended)
+pip install -e ".[dev]"
+
+# Exact reproducible environment
+pip install -r requirements.lock
+```
+
+`requirements.txt` is kept as a compatibility shim and delegates to
+`pyproject.toml` to avoid drift between dependency definitions.
+
 ## Input Data
 
 Smart-meter input is one or more parquet files under `data.re_data_dir`. Each

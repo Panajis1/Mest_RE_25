@@ -1,28 +1,10 @@
-# Data loading
-pandas>=2.0,<3
-pyarrow>=11.0,<16   # used by pandas for read_parquet / to_parquet
-numpy>=1.24,<3
-sqlalchemy>=2.0,<3  # used by pandas read_sql_query for SQLite (load_dataport)
-requests>=2.0,<3
-acnportal>=0.3.3    # used to fetch data from ACN API (load_caltech)
-
-# Exploration / plotting
-matplotlib>=3.7,<4
-plotly>=5.18,<6
-kaleido>=0.2.1,<0.3   # static PNG export for Plotly (Results figures)
-seaborn>=0.13,<1
-
-# Progress bars, used in fast load smart meter and potentially in model training scripts
-tqdm>=4.65,<5
-
-# Optional: ipython for notebook-style "Run Cell" and rich display of DataFrames
-ipython>=8.0,<9
-
-# ML / model training and inference
-scikit-learn>=1.3,<1.4   # pre-trained models (ac_detector_v1, hp_detector_v1) require 1.3.x
-scipy>=1.10,<2
-joblib>=1.3,<2
-
-# Config loading and system utilities
-pyyaml>=6.0,<7
-psutil>=5.9,<7
+# Compatibility shim.
+# Primary dependency source: pyproject.toml
+# Reproducible fully-pinned environment: requirements.lock
+#
+# Typical installs:
+#   pip install -e ".[dev]"
+#   pip install -r requirements.lock
+#
+# This file intentionally delegates to pyproject dependencies to avoid drift.
+-e .[dev]

@@ -1,4 +1,5 @@
 # Pinned environment — generated from the known-good development venv.
+# Dependency source of truth is pyproject.toml; this file is the reproducible lock snapshot.
 # Install with: pip install -r requirements.lock
 #
 # Generated: 2026-04-28  Python 3.9  macOS
