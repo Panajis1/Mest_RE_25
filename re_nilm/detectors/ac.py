@@ -30,7 +30,6 @@ _DEFAULT_FEATURE_COLS: List[str] = [
     "hot_load_ratio",
 ]
 
-_SUMMER_MONTHS = [6, 7, 8]
 _AC_ON_LABEL = "has_ac"
 
 
@@ -44,7 +43,6 @@ class ACDetector(AbstractDetector):
         model: Loaded sklearn pipeline (SimpleImputer + RandomForestClassifier).
         prob_threshold: Minimum predicted probability to call has_ac=True.
         feature_cols: Feature columns to pass to the model (must match training order).
-        inference_months: Only compute features from these months (Swiss summer = [6,7,8]).
         day_rad_threshold: W/m² above which a row is considered daytime.
         min_day_rows: Minimum daytime rows required to compute features.
     """
@@ -54,14 +52,12 @@ class ACDetector(AbstractDetector):
         model,
         prob_threshold: float = 0.55,
         feature_cols: Optional[List[str]] = None,
-        inference_months: Optional[List[int]] = None,
         day_rad_threshold: float = 50.0,
         min_day_rows: int = 100,
     ):
         self.model = model
         self.prob_threshold = prob_threshold
         self.feature_cols = feature_cols or _DEFAULT_FEATURE_COLS
-        self.inference_months = inference_months or _SUMMER_MONTHS
         self.day_rad_threshold = day_rad_threshold
         self.min_day_rows = min_day_rows
 
@@ -84,11 +80,7 @@ class ACDetector(AbstractDetector):
         df = customer_df.copy()
         df["DT_UTC"] = pd.to_datetime(df["DT_UTC"], errors="coerce")
         df = df.dropna(subset=["DT_UTC"]).sort_values("DT_UTC")
-
-        # Month filter (only process summer months for Swiss AC)
-        df = df[df["DT_UTC"].dt.month.isin(self.inference_months)]
-        if df.empty:
-            return None
+        df = df.drop_duplicates(subset=["DT_UTC"], keep="first")
 
         # Normalize to datetime64[us] — pandas 2.x merge_asof requires identical units
         df["DT_UTC"] = df["DT_UTC"].astype("datetime64[us]")

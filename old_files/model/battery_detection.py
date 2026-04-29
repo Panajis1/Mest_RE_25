@@ -189,8 +189,28 @@ def _estimate_partner_customer_count(data_dir, partner_type=PARTNER_TYPE):
         return None
 
 
-def analyze_battery_residential_v7(df_customer, weather_df, pv_row, temp_buffer=TEMP_MATCH_BUFFER_C, sunset_map=None):
-    res = {"battery_prob": 0, "has_battery": "No", "status": "Success", 
+def analyze_battery_residential_v7(
+    df_customer,
+    weather_df,
+    pv_row,
+    temp_buffer=TEMP_MATCH_BUFFER_C,
+    sunset_map=None,
+    sigmoid_intercept=None,
+    strict_min_matched_sunny_days=None,
+    low_matched_days_z_penalty=None,
+    nominal_capacity_discharge_fraction=None,
+    pv_anchor_kwh_per_kwp=None,
+    pv_anchor_blend_weight=None,
+):
+    # Fall back to module-level globals when not provided by caller.
+    _sigmoid_intercept = SIGMOID_INTERCEPT if sigmoid_intercept is None else sigmoid_intercept
+    _strict_min_days = STRICT_MIN_MATCHED_SUNNY_DAYS if strict_min_matched_sunny_days is None else strict_min_matched_sunny_days
+    _low_days_penalty = LOW_MATCHED_DAYS_Z_PENALTY if low_matched_days_z_penalty is None else low_matched_days_z_penalty
+    _discharge_fraction = NOMINAL_CAPACITY_DISCHARGE_FRACTION if nominal_capacity_discharge_fraction is None else nominal_capacity_discharge_fraction
+    _pv_anchor_kwh_per_kwp = PV_ANCHOR_KWH_PER_KWP if pv_anchor_kwh_per_kwp is None else pv_anchor_kwh_per_kwp
+    _pv_anchor_blend = PV_ANCHOR_BLEND_WEIGHT if pv_anchor_blend_weight is None else pv_anchor_blend_weight
+
+    res = {"battery_prob": 0, "has_battery": "No", "status": "Success",
            "observed_gap_kwh": 0, "profiles": None,
            "estimated_battery_capacity_kwh": np.nan,
            "capacity_ci_lower_kwh": np.nan,
@@ -379,15 +399,15 @@ def analyze_battery_residential_v7(df_customer, weather_df, pv_row, temp_buffer=
         # --- THE SIGMOID (Optimized for High Recall, now with robust matched-day terms) ---
         inj_bonus = INJECTION_BONUS_WEIGHT * (INJECTION_RATIO_REFERENCE - inj_ratio)
         z = (
-            SIGMOID_INTERCEPT
+            _sigmoid_intercept
             + (SIGMOID_PEAK_SHIFT_WEIGHT * peak_shift)
             + (SIGMOID_GAP_RATIO_WEIGHT * gap_ratio)
             + inj_bonus
             + SIGMOID_CONSISTENCY_WEIGHT * float(np.clip(consistency, 0.0, 1.0))
             + SIGMOID_SHIFT_RATIO_WEIGHT * float(np.clip(np.nan_to_num(shift_ratio, nan=0.0), 0.0, 1.0))
         )
-        if len(sunny_matched) < STRICT_MIN_MATCHED_SUNNY_DAYS:
-            z -= LOW_MATCHED_DAYS_Z_PENALTY
+        if len(sunny_matched) < _strict_min_days:
+            z -= _low_days_penalty
 
         # Robust Sigmoid to prevent Overflow
         prob = 1 / (1 + np.exp(-np.clip(z, SIGMOID_CLIP_MIN, SIGMOID_CLIP_MAX)))
@@ -415,13 +435,13 @@ def analyze_battery_residential_v7(df_customer, weather_df, pv_row, temp_buffer=
             cap_low = np.nan
             cap_high = np.nan
         else:
-            nominal_capacity_series = capacity_shift / max(NOMINAL_CAPACITY_DISCHARGE_FRACTION, 0.05)
+            nominal_capacity_series = capacity_shift / max(_discharge_fraction, 0.05)
 
             if pd.notna(pv_capacity_kwp):
-                pv_anchor = pv_capacity_kwp * PV_ANCHOR_KWH_PER_KWP
+                pv_anchor = pv_capacity_kwp * _pv_anchor_kwh_per_kwp
                 nominal_capacity_series = (
-                    (1.0 - PV_ANCHOR_BLEND_WEIGHT) * nominal_capacity_series
-                    + PV_ANCHOR_BLEND_WEIGHT * pv_anchor
+                    (1.0 - _pv_anchor_blend) * nominal_capacity_series
+                    + _pv_anchor_blend * pv_anchor
                 )
 
             raw_cap_est = float(nominal_capacity_series.quantile(CAPACITY_ESTIMATE_QUANTILE))

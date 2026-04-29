@@ -1,33 +1,19 @@
 """PV capacity and self-consumption estimator.
 
-Delegates to _capacity_and_sc_from_data and _bootstrap_capacity_and_sc in
-model/pv_detection.py. Will be fully migrated once pv_detection.py is split.
+Uses migrated legacy-compatible helpers inside re_nilm.
 """
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from re_nilm.estimators.base import AbstractEstimator
-
-_PV_DIR = Path(__file__).resolve().parents[2] / "model"
-if str(_PV_DIR) not in sys.path:
-    sys.path.insert(0, str(_PV_DIR))
-
-try:
-    from pv_detection import (
-        _capacity_and_sc_from_data,
-        _bootstrap_capacity_and_sc,
-        compute_daily_weather,
-        build_customer_daily_features,
-    )
-    _PV_AVAILABLE = True
-except ImportError:
-    _PV_AVAILABLE = False
+from re_nilm.estimators._pv_capacity_v1 import (
+    _bootstrap_capacity_and_sc,
+    _capacity_and_sc_from_data,
+)
+from re_nilm.features.pv_daily import build_customer_daily_features, compute_daily_weather
 
 
 _STC_FACTOR = 4000.0  # (kWh/15min)/(W/m²) → kWp
@@ -103,9 +89,6 @@ class PVCapacityEstimator(AbstractEstimator):
 
         if not detection_result.get("has_pv", False):
             return None
-
-        if not _PV_AVAILABLE:
-            return {"customer_id": customer_id, "pv_capacity_kwp": np.nan, "error": "pv_detection not importable"}
 
         try:
             merged, daily = _make_cust_days(customer_ts, weather)

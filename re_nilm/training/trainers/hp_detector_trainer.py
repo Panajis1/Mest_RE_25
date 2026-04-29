@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from pathlib import Path
 from typing import List, Optional
 
@@ -18,6 +17,10 @@ from sklearn.pipeline import Pipeline
 
 from re_nilm.features.load import extract_hp_features
 from re_nilm.training.base import AbstractTrainer
+from re_nilm.training._dataset_builders import (
+    build_hp_modeled_dataset,
+    convert_f_to_c_if_needed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +48,6 @@ RF_PARAMS = dict(
     n_jobs=-1,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-
-
 def _build_feature_table_from_raw(df: pd.DataFrame) -> pd.DataFrame:
     """Build per-customer HP feature table from the raw training time series.
 
@@ -56,16 +56,9 @@ def _build_feature_table_from_raw(df: pd.DataFrame) -> pd.DataFrame:
       type values: 'HP' (sub-meter), 'TOT' (aggregate load)
 
     Delegates label inference (winter_hp / summer_hp / no_hp) and feature
-    extraction to hp_detection_functions.build_modeled_dataset(), then maps
+    extraction to re_nilm.training._dataset_builders.build_hp_modeled_dataset(), then maps
     its output to the expected trainer format (adding hp_type / hp_label columns).
     """
-    if str(_REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(_REPO_ROOT))
-    from hp_model.hp_detection_functions import (  # type: ignore[import]
-        build_modeled_dataset,
-        convert_f_to_c_if_needed,
-    )
-
     needed = ["type", "source", "dt_utc", "glob_rad", "value_kw_mean", "id_customer", "temp"]
     df = df[needed].copy()
     df = df[df["type"].isin(["HP", "TOT"])].copy()
@@ -74,7 +67,7 @@ def _build_feature_table_from_raw(df: pd.DataFrame) -> pd.DataFrame:
     df = convert_f_to_c_if_needed(df)
     df = df.sort_values(["id_customer", "type", "dt_utc"]).reset_index(drop=True)
 
-    modeled_df = build_modeled_dataset(df)
+    modeled_df = build_hp_modeled_dataset(df)
     if modeled_df.empty:
         raise ValueError("No usable customers found in raw training data after filtering")
 

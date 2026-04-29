@@ -24,18 +24,47 @@ _DEFAULT_FEATURE_COLS: List[str] = [
     "acf_24h",
 ]
 
-# Label names matching HP model training labels
+# Label names matching HP model training labels (hp_detection_functions.INT_TO_LABEL)
 _INT_TO_LABEL = {0: "no_hp", 1: "winter_hp", 2: "summer_hp"}
+
+
+def _classifier_step(pipeline):
+    """Return the RF step — trainer uses 'clf', some legacy scripts use 'rf'."""
+    ns = pipeline.named_steps
+    if "clf" in ns:
+        return ns["clf"]
+    if "rf" in ns:
+        return ns["rf"]
+    raise AttributeError(f"Pipeline has no 'clf' or 'rf' step: {list(ns.keys())}")
+
+
+def _prob_hp_winter_plus_summer(model, X: np.ndarray) -> float:
+    """Match hp_detection_functions / scripts/validate_detectors old HP branch."""
+    proba = model.predict_proba(X)
+    classes = _classifier_step(model).classes_
+    hp_probs = {}
+    for cls_id, cls_name in _INT_TO_LABEL.items():
+        if cls_id in classes:
+            idx = int(np.where(classes == cls_id)[0][0])
+            hp_probs[cls_name] = float(proba[0, idx])
+        else:
+            hp_probs[cls_name] = 0.0
+    return hp_probs.get("winter_hp", 0.0) + hp_probs.get("summer_hp", 0.0)
 
 
 class HeatPumpDetector(AbstractDetector):
     """HP presence detector using a pre-trained Random Forest 3-class classifier.
 
+    Decision logic matches legacy ``hp_detection_functions`` / validation script:
+
+    - ``has_hp`` is True iff ``model.predict(X)[0]`` maps to ``winter_hp`` or ``summer_hp``
+      (no probability threshold gate).
+    - ``prob_hp`` is ``P(winter_hp) + P(summer_hp)`` from ``predict_proba``.
+
     Outputs one of: no_hp, winter_hp, summer_hp.
 
     Args:
         model: Loaded sklearn pipeline (SimpleImputer + RandomForestClassifier).
-        prob_threshold: Minimum class probability for the HP class to call has_hp=True.
         feature_cols: Feature column names in training order.
         night_rad_threshold: Max W/m² for a timestep to count as 'night'.
         min_night_rows: Minimum night rows required to extract features.
@@ -44,13 +73,11 @@ class HeatPumpDetector(AbstractDetector):
     def __init__(
         self,
         model,
-        prob_threshold: float = 0.5,
         feature_cols: Optional[List[str]] = None,
         night_rad_threshold: float = 20.0,
         min_night_rows: int = 100,
     ):
         self.model = model
-        self.prob_threshold = prob_threshold
         self.feature_cols = feature_cols or _DEFAULT_FEATURE_COLS
         self.night_rad_threshold = night_rad_threshold
         self.min_night_rows = min_night_rows
@@ -74,6 +101,7 @@ class HeatPumpDetector(AbstractDetector):
         df = customer_df.copy()
         df["DT_UTC"] = pd.to_datetime(df["DT_UTC"], errors="coerce")
         df = df.dropna(subset=["DT_UTC"]).sort_values("DT_UTC")
+        df = df.drop_duplicates(subset=["DT_UTC"], keep="first")
 
         # Normalize to datetime64[us] — pandas 2.x merge_asof requires identical units
         df["DT_UTC"] = df["DT_UTC"].astype("datetime64[us]")
@@ -103,14 +131,13 @@ class HeatPumpDetector(AbstractDetector):
 
         X = np.array([[feats.get(c, np.nan) for c in self.feature_cols]])
         try:
-            proba = self.model.predict_proba(X)[0]  # shape (3,) for no_hp / winter_hp / summer_hp
-            pred_class = int(np.argmax(proba))
+            pred = int(self.model.predict(X)[0])
+            prob_hp = _prob_hp_winter_plus_summer(self.model, X)
         except Exception:
             return None
 
-        hp_type = _INT_TO_LABEL.get(pred_class, "no_hp")
-        has_hp = hp_type != "no_hp" and float(proba[pred_class]) >= self.prob_threshold
-        prob_hp = float(proba[pred_class]) if has_hp else float(max(proba[1], proba[2]))
+        hp_type = _INT_TO_LABEL.get(pred, "no_hp")
+        has_hp = hp_type != "no_hp"
 
         return {
             "customer_id": customer_id,
