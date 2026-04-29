@@ -2,26 +2,15 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-# Delegate to pv_detection.py for the heavy aggregation logic
-_PV_DIR = Path(__file__).resolve().parents[2] / "model"
-if str(_PV_DIR) not in sys.path:
-    sys.path.insert(0, str(_PV_DIR))
-
-try:
-    from pv_detection import (
-        aggregate_portfolio_estimates as _aggregate_portfolio_estimates,
-        compute_segment_stats as _compute_segment_stats,
-    )
-    _PV_AVAILABLE = True
-except ImportError:
-    _PV_AVAILABLE = False
+from re_nilm.portfolio._pv_portfolio_v1 import (
+    aggregate_portfolio_estimates as _aggregate_portfolio_estimates,
+    compute_segment_stats as _compute_segment_stats,
+)
 
 
 def aggregate_portfolio_estimates(
@@ -45,42 +34,27 @@ def aggregate_portfolio_estimates(
     """
     if results.empty:
         return {}
-    if not _PV_AVAILABLE:
-        # Minimal fallback aggregation when pv_detection is not importable
-        valid = results["pv_capacity_kwp"].notna() & (results["pv_capacity_kwp"] > 0)
-        df = results[valid]
-        return {
-            "n_customers": len(df),
-            "total_pv_capacity_kwp": float(df["pv_capacity_kwp"].sum()),
-            "mean_pv_capacity_kwp": float(df["pv_capacity_kwp"].mean()),
-        }
     return _aggregate_portfolio_estimates(results, pv_indicators)
 
 
 def compute_segment_stats(
     results: pd.DataFrame,
-    segment_col: str,
-    value_col: str = "pv_capacity_kwp",
+    metadata: Optional[pd.DataFrame] = None,
+    segment_col: str = "customer_type",
+    min_segment_size: int = 30,
 ) -> pd.DataFrame:
-    """Compute summary statistics broken down by a segment column.
+    """Compute per-segment capacity fence statistics (legacy-compatible).
 
     Args:
         results: Per-customer results DataFrame.
-        segment_col: Column to segment by (e.g. 'has_battery', 'hp_type').
-        value_col: Column to aggregate (default: pv_capacity_kwp).
+        metadata: Optional customer metadata for segmentation.
+        segment_col: Metadata column used for segment assignment.
+        min_segment_size: Segments smaller than this are merged into 'other'.
 
     Returns:
-        DataFrame with one row per segment and statistics: n, mean, median, std, sum.
+        DataFrame of segment-level capacity statistics and IQR fences.
     """
-    if _PV_AVAILABLE:
-        return _compute_segment_stats(results, segment_col, value_col)
-
-    # Fallback
-    return (
-        results.groupby(segment_col)[value_col]
-        .agg(n="count", mean="mean", median="median", std="std", total="sum")
-        .reset_index()
-    )
+    return _compute_segment_stats(results, metadata, segment_col, min_segment_size)
 
 
 def capacity_weighted_sc_aggregate(

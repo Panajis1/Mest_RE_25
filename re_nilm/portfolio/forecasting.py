@@ -2,22 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from typing import List, Optional
+from typing import List
 
-import numpy as np
 import pandas as pd
-
-_PV_DIR = Path(__file__).resolve().parents[2] / "model"
-if str(_PV_DIR) not in sys.path:
-    sys.path.insert(0, str(_PV_DIR))
-
-try:
-    from pv_detection import forecast_pv_for_customers_streaming as _forecast_streaming
-    _PV_AVAILABLE = True
-except ImportError:
-    _PV_AVAILABLE = False
 
 
 def predict_customer_pv_15min(

@@ -1,28 +1,16 @@
 """Battery capacity estimator.
 
-Delegates to analyze_battery_residential_v7 in model/battery_detection.py which
+Delegates to analyze_battery_residential_v7 in re_nilm.detectors._battery_v7 which
 returns the detection probability and shift-based capacity estimates.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
+from re_nilm.detectors._battery_v7 import analyze_battery_residential_v7 as _analyze_battery
 from re_nilm.estimators.base import AbstractEstimator
-
-_BATTERY_DIR = Path(__file__).resolve().parents[2] / "model"
-if str(_BATTERY_DIR) not in sys.path:
-    sys.path.insert(0, str(_BATTERY_DIR))
-
-try:
-    from battery_detection import analyze_battery_residential_v7 as _analyze_battery
-    _BATTERY_AVAILABLE = True
-except ImportError:
-    _BATTERY_AVAILABLE = False
 
 
 class BatteryCapacityEstimator(AbstractEstimator):
@@ -54,9 +42,6 @@ class BatteryCapacityEstimator(AbstractEstimator):
 
         if not detection_result.get("has_battery", False):
             return None
-
-        if not _BATTERY_AVAILABLE:
-            return {"customer_id": customer_id, "battery_capacity_kwh": np.nan, "error": "import_error"}
 
         pv_result = detection_result.get("pv_result", {})
         pv_row = {

@@ -1,8 +1,25 @@
 """Train AC and HP detector models from the unified Dataport training dataset.
 
+Reads a pre-processed parquet that combines smart meter load features with
+Dataport ground-truth appliance labels and writes trained scikit-learn models
+to the ``models/`` directory. Existing artifacts are overwritten.
+
+Prerequisites:
+    - Training data at the path set by ``data.training_data_path`` in the config
+      (default: ``data/processed/training/all_sources_load_with_weather.parquet``).
+      Required columns include ``customer_id``, ``label``, and all feature columns
+      expected by ACDetectorTrainer / HPDetectorTrainer (see their FEATURE_COLS).
+    - scikit-learn 1.3.x — model artifacts are not forward-compatible across minor
+      versions (pinned in requirements.txt).
+
+Output:
+    models/ac_detector_v1.joblib   — Random-forest AC detector (sklearn Pipeline)
+    models/hp_detector_v1.joblib   — Random-forest HP detector (sklearn Pipeline)
+
 Usage:
     python scripts/train_models.py --config config/re_production.yaml
-    python scripts/train_models.py --models ac_detector,hp_detector
+    python scripts/train_models.py --models ac_detector
+    python scripts/train_models.py --training-data path/to/training.parquet
 """
 
 from __future__ import annotations
@@ -39,14 +56,15 @@ def _parse_args():
 
 
 def _load_training_data(path: Path) -> "pd.DataFrame":
+    """Load the training parquet and raise a clear error if the file is missing."""
     import pandas as pd
     if not path.exists():
         raise FileNotFoundError(f"Training data not found: {path}")
-    df = pd.read_parquet(path)
-    return df
+    return pd.read_parquet(path)
 
 
 def _train_ac_detector(training_data_path: Path, output_path: Path, cfg: dict) -> None:
+    """Fit, evaluate, and save the AC detector model."""
     import pandas as pd
 
     logger = logging.getLogger("train_models.ac")
@@ -69,6 +87,7 @@ def _train_ac_detector(training_data_path: Path, output_path: Path, cfg: dict) -
 
 
 def _train_hp_detector(training_data_path: Path, output_path: Path, cfg: dict) -> None:
+    """Fit, evaluate, and save the heat-pump detector model."""
     logger = logging.getLogger("train_models.hp")
     logger.info("Loading training data from %s", training_data_path)
     df = _load_training_data(training_data_path)
@@ -117,7 +136,7 @@ def main():
             cfg,
         )
 
-    print("\nTraining complete.")
+    logging.getLogger(__name__).info("Training complete.")
 
 
 if __name__ == "__main__":

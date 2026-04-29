@@ -1,26 +1,12 @@
-"""Battery detector — heuristic sigmoid scorer from battery_detection.py."""
+"""Battery detector — heuristic sigmoid scorer from internal battery v7 logic."""
 
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from re_nilm.detectors.base import AbstractDetector
-
-# Import the original battery detection function from the legacy location.
-# Will be replaced once battery_detection.py is fully migrated to re_nilm/estimators/.
-_BATTERY_DIR = Path(__file__).resolve().parents[2] / "model"
-if str(_BATTERY_DIR) not in sys.path:
-    sys.path.insert(0, str(_BATTERY_DIR))
-
-try:
-    from battery_detection import analyze_battery_residential_v7 as _analyze_battery
-    _BATTERY_AVAILABLE = True
-except ImportError:
-    _BATTERY_AVAILABLE = False
+from re_nilm.detectors._battery_v7 import analyze_battery_residential_v7 as _analyze_battery
 
 
 class BatteryDetector(AbstractDetector):
@@ -32,8 +18,8 @@ class BatteryDetector(AbstractDetector):
     The detector is passed the pv_result dict in context['pv_result'].
 
     Scoring uses a logistic sigmoid over five signals: peak_shift, gap_ratio,
-    injection_bonus, consistency, and shift_ratio. Parameters below reflect the
-    tuned values from battery_detection.py (commit 'adjust textcolor in plot').
+    injection_bonus, consistency, and shift_ratio. Parameters reflect migrated
+    battery v7 defaults.
 
     Args:
         classification_threshold: Minimum battery_prob to call has_battery=True.
@@ -100,22 +86,17 @@ class BatteryDetector(AbstractDetector):
                 "battery_status": "skipped_no_pv",
             }
 
-        if not _BATTERY_AVAILABLE:
-            return {
-                "customer_id": customer_id,
-                "has_battery": False,
-                "prob_battery": np.nan,
-                "battery_status": "import_error",
-            }
-
         df = customer_df.copy()
         df["DT_UTC"] = pd.to_datetime(df["DT_UTC"], errors="coerce")
         df = df.dropna(subset=["DT_UTC"]).set_index("DT_UTC").sort_index()
 
-        # Build a pv_row dict compatible with the legacy function signature
+        # Build a pv_row dict compatible with the legacy function signature.
+        # has_pv_prob is the key _battery_v7 uses for the inner PV gate (requires >= 0.5).
+        # PVDetector returns this value under the key "prob_pv".
         pv_row = {
             "pv_capacity_kwp": pv_result.get("pv_capacity_kwp", 0.0),
             "has_pv": pv_result.get("has_pv", False),
+            "has_pv_prob": pv_result.get("prob_pv", np.nan),
         }
 
         weather = weather_df.copy()

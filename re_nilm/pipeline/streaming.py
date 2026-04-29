@@ -104,14 +104,22 @@ class StreamingEngine:
         customer_ids: Iterable[str],
         processor_fn: Callable[[str], Optional[dict]],
         output_path: Path,
+        worker_initializer: Optional[Callable] = None,
+        worker_initargs: tuple = (),
     ) -> pd.DataFrame:
         """Process all customer IDs and collect results.
 
         Args:
             customer_ids: Iterable of customer ID strings to process.
-            processor_fn: Callable(customer_id) → dict | None. Must be picklable
-                for multiprocessing (i.e. a top-level function or a class with __call__).
+            processor_fn: Callable(customer_id) → dict | None. Must be a
+                module-level function (not a closure) for multiprocessing.
             output_path: Where to write/append results parquet.
+            worker_initializer: Optional callable passed to ProcessPoolExecutor
+                initializer — called once per worker process on startup.
+                Use this to set up per-process state (detector, index, weather)
+                instead of embedding large objects in processor_fn, which would
+                be pickled once per task submission.
+            worker_initargs: Positional arguments forwarded to worker_initializer.
 
         Returns:
             Final results DataFrame.
@@ -146,6 +154,8 @@ class StreamingEngine:
             results_this_batch: List[dict] = []
 
             if self.n_workers <= 1:
+                if worker_initializer is not None:
+                    worker_initializer(*worker_initargs)
                 for cid in batch_ids:
                     try:
                         result = processor_fn(cid)
@@ -154,7 +164,11 @@ class StreamingEngine:
                     except Exception as exc:
                         logger.error("[StreamingEngine] Error processing %s: %s", cid, exc)
             else:
-                with ProcessPoolExecutor(max_workers=self.n_workers) as pool:
+                with ProcessPoolExecutor(
+                    max_workers=self.n_workers,
+                    initializer=worker_initializer,
+                    initargs=worker_initargs,
+                ) as pool:
                     futures = {pool.submit(processor_fn, cid): cid for cid in batch_ids}
                     for future in as_completed(futures):
                         cid = futures[future]

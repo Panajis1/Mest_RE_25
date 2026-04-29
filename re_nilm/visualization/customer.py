@@ -2,31 +2,16 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
-_PV_DIR = Path(__file__).resolve().parents[2] / "model"
-if str(_PV_DIR) not in sys.path:
-    sys.path.insert(0, str(_PV_DIR))
-
-try:
-    from pv_detection import (
-        plot_customer_timeseries as _plot_timeseries,
-        plot_customer_capacity_validation as _plot_capacity_validation,
-        plot_customer_high_low_profile as _plot_high_low,
-        plot_customer_heatmap as _plot_heatmap,
-    )
-    _PV_AVAILABLE = True
-except ImportError:
-    _PV_AVAILABLE = False
-
-
-def _require_pv():
-    if not _PV_AVAILABLE:
-        raise ImportError("pv_detection.py not importable — cannot render customer plots")
+from re_nilm.visualization._pv_plots_v1 import (
+    plot_customer_capacity_validation as _plot_capacity_validation,
+    plot_customer_heatmap as _plot_heatmap,
+    plot_customer_high_low_profile as _plot_high_low,
+    plot_customer_timeseries as _plot_timeseries,
+)
 
 
 def plot_customer_timeseries(
@@ -44,7 +29,6 @@ def plot_customer_timeseries(
     Returns:
         Plotly Figure.
     """
-    _require_pv()
     return _plot_timeseries(customer_ts, weather_df=weather_df, title=title)
 
 
@@ -65,7 +49,6 @@ def plot_customer_capacity_validation(
     Returns:
         Plotly Figure.
     """
-    _require_pv()
     return _plot_capacity_validation(customer_ts, pv_capacity_kwp, weather_df, title=title)
 
 
@@ -84,7 +67,6 @@ def plot_customer_high_low_profile(
     Returns:
         Plotly Figure.
     """
-    _require_pv()
     return _plot_high_low(customer_ts, weather_df, title=title)
 
 
@@ -103,5 +85,4 @@ def plot_customer_heatmap(
     Returns:
         Plotly Figure.
     """
-    _require_pv()
     return _plot_heatmap(customer_ts, col=col, title=title)

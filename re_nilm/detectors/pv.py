@@ -1,4 +1,4 @@
-"""PV detection — wraps compute_pv_indicators and classify_pv_customers from pv_detection.py."""
+"""PV detector using internal re_nilm PV daily feature functions."""
 
 from __future__ import annotations
 
@@ -6,13 +6,36 @@ import numpy as np
 import pandas as pd
 
 from re_nilm.detectors.base import AbstractDetector
+from re_nilm.features.pv_daily import (
+    build_customer_daily_features,
+    classify_pv_customers,
+    compute_daily_weather,
+    compute_pv_indicators,
+)
+
+
+def _empty_result(customer_id: str) -> dict:
+    return {
+        "customer_id": customer_id,
+        "has_pv": False,
+        "prob_pv": 0.0,
+        "yearly_prod_kwh": 0.0,
+        "corr_prod_rad": np.nan,
+        "DeltaProd": np.nan,
+        "DeltaNet": np.nan,
+        "beta_regression": np.nan,
+    }
 
 
 class PVDetector(AbstractDetector):
     """Unsupervised PV detector based on production-radiation correlation and delta indicators.
 
-    Mirrors the logic of pv_detection.py:compute_pv_indicators() and classify_pv_customers(),
-    adapted to the single-customer streaming interface.
+    Uses internal re_nilm feature helpers:
+    compute_daily_weather → build_customer_daily_features →
+    compute_pv_indicators → classify_pv_customers.
+
+    High/low radiation days are classified using monthly 20th/80th percentile quantiles
+    (not fixed thresholds), matching the original batch implementation exactly.
 
     Args:
         corr_threshold: Minimum prod-radiation correlation to flag as PV.
@@ -50,75 +73,74 @@ class PVDetector(AbstractDetector):
             return None
 
         customer_id = str(customer_df["ID"].iloc[0])
-        df = customer_df.copy()
-        df["DT_UTC"] = pd.to_datetime(df["DT_UTC"], errors="coerce")
-        df = df.dropna(subset=["DT_UTC"]).sort_values("DT_UTC")
 
-        # Normalize to datetime64[us] — pandas 2.x merge_asof requires identical units
-        df["DT_UTC"] = df["DT_UTC"].astype("datetime64[us]")
-        weather = weather_df.copy()
-        weather["dt_utc"] = weather["dt_utc"].astype("datetime64[us]")
-        weather = weather.sort_values("dt_utc")
-        merged = pd.merge_asof(
-            df.rename(columns={"DT_UTC": "_ts"}),
-            weather.rename(columns={"dt_utc": "_ts"}),
-            on="_ts",
+        # Build weather indexed by timestamp (required by compute_daily_weather)
+        w = weather_df.copy()
+        w["dt_utc"] = pd.to_datetime(w["dt_utc"]).astype("datetime64[us]")
+        weather_idx = (
+            w.rename(columns={"dt_utc": "timestamp"})
+            .set_index("timestamp")
+            .sort_index()
+        )
+
+        # Prepare customer data with global_rad_W merged in
+        df = customer_df.copy()
+        df["DT_UTC"] = pd.to_datetime(df["DT_UTC"], errors="coerce").astype("datetime64[us]")
+        df = df.dropna(subset=["DT_UTC"]).sort_values("DT_UTC")
+        df["ID"] = customer_id
+
+        weather_reset = (
+            weather_idx[["global_rad_W"]]
+            .rename_axis("DT_UTC")
+            .reset_index()
+        )
+        weather_reset["DT_UTC"] = weather_reset["DT_UTC"].astype("datetime64[us]")
+        df_with_rad = pd.merge_asof(
+            df,
+            weather_reset,
+            on="DT_UTC",
             direction="backward",
             tolerance=pd.Timedelta("1h"),
         )
 
-        yearly_prod = float(merged["PROD_KWH"].sum())
+        try:
+            daily_weather = compute_daily_weather(weather_idx)
+            if daily_weather.empty:
+                return _empty_result(customer_id)
 
-        # Production vs radiation correlation and regression slope
-        g = merged.dropna(subset=["global_rad_W"])
-        if g["global_rad_W"].var() > 0 and g["PROD_KWH"].var() > 0:
-            corr_prod_rad = float(g["PROD_KWH"].corr(g["global_rad_W"]))
-            x = g["global_rad_W"].to_numpy()
-            y = g["PROD_KWH"].to_numpy()
-            x_mean, y_mean = x.mean(), y.mean()
-            denom = ((x - x_mean) ** 2).sum()
-            beta = float(((x - x_mean) * (y - y_mean)).sum() / denom) if denom > 0 else 0.0
-        else:
-            corr_prod_rad = np.nan
-            beta = 0.0
+            daily_features = build_customer_daily_features(df_with_rad, daily_weather)
+            if daily_features.empty:
+                return _empty_result(customer_id)
 
-        # Delta indicators: midday on high-rad vs low-rad days
-        merged["_date"] = merged["_ts"].dt.date
-        daily = merged.groupby("_date").agg(
-            G_midday=("global_rad_W", "max"),
-            Prod_midday=("PROD_KWH", lambda x: x.iloc[len(x) // 3: 2 * len(x) // 3].mean()),
-            Net_midday=("CONSO_KWH", lambda x: x.iloc[len(x) // 3: 2 * len(x) // 3].mean()),
-        )
-        high = daily[daily["G_midday"] >= 400]
-        low = daily[daily["G_midday"] < 100]
+            pv_indicators = compute_pv_indicators(daily_features, df_with_rad)
+            if pv_indicators.empty:
+                return _empty_result(customer_id)
 
-        DeltaProd = (
-            float(high["Prod_midday"].mean() - low["Prod_midday"].mean())
-            if not high.empty and not low.empty else np.nan
-        )
-        DeltaNet = (
-            float(high["Net_midday"].mean() - low["Net_midday"].mean())
-            if not high.empty and not low.empty else np.nan
-        )
+            pv_classified = classify_pv_customers(
+                pv_indicators,
+                corr_threshold=self.corr_threshold,
+                delta_net_threshold=self.delta_net_threshold,
+                min_yearly_prod=self.min_yearly_prod_kwh,
+            )
+        except Exception as exc:
+            return {
+                **_empty_result(customer_id),
+                "has_pv": False,
+                "prob_pv": np.nan,
+                "status": f"error: {exc}",
+            }
 
-        # Classification
-        has_pv = bool(
-            (yearly_prod > self.min_yearly_prod_kwh)
-            or (not np.isnan(corr_prod_rad) and corr_prod_rad > self.corr_threshold)
-            or (not np.isnan(DeltaProd) and DeltaProd > 0.01)
-            or (not np.isnan(DeltaNet) and DeltaNet < self.delta_net_threshold)
-        )
+        if pv_classified.empty:
+            return _empty_result(customer_id)
 
-        corr_clipped = corr_prod_rad if not np.isnan(corr_prod_rad) else 0.0
-        prob_pv = float(np.clip((corr_clipped - 0.1) / 0.4, 0.0, 1.0)) if has_pv else 0.0
-
+        row = pv_classified.iloc[0]
         return {
             "customer_id": customer_id,
-            "has_pv": has_pv,
-            "prob_pv": prob_pv,
-            "yearly_prod_kwh": yearly_prod,
-            "corr_prod_rad": corr_prod_rad,
-            "DeltaProd": DeltaProd,
-            "DeltaNet": DeltaNet,
-            "beta_regression": beta,
+            "has_pv": bool(row.get("has_pv", False)),
+            "prob_pv": float(row.get("has_pv_prob", 0.0)),
+            "yearly_prod_kwh": float(row.get("yearly_prod", np.nan)),
+            "corr_prod_rad": float(row.get("corr_prod_rad", np.nan)),
+            "DeltaProd": float(row.get("DeltaProd", np.nan)),
+            "DeltaNet": float(row.get("DeltaNet", np.nan)),
+            "beta_regression": float(row.get("beta_regression", np.nan)),
         }

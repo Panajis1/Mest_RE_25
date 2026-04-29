@@ -2,25 +2,15 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-_PV_DIR = Path(__file__).resolve().parents[2] / "model"
-if str(_PV_DIR) not in sys.path:
-    sys.path.insert(0, str(_PV_DIR))
-
-try:
-    from pv_detection import (
-        flag_implausible_estimates as _flag_implausible_estimates,
-        evaluate_portfolio as _evaluate_portfolio,
-    )
-    _PV_AVAILABLE = True
-except ImportError:
-    _PV_AVAILABLE = False
+from re_nilm.portfolio._pv_portfolio_v1 import (
+    evaluate_portfolio as _evaluate_portfolio,
+    flag_implausible_estimates as _flag_implausible_estimates,
+)
 
 
 def evaluate_portfolio(
@@ -47,8 +37,6 @@ def evaluate_portfolio(
     Returns:
         Dict with evaluation summary statistics and per-customer flags.
     """
-    if not _PV_AVAILABLE:
-        return {"error": "pv_detection not importable — cannot evaluate portfolio"}
     return _evaluate_portfolio(results, pv_indicators, metadata, segment_col, yield_bounds)
 
 
@@ -70,15 +58,10 @@ def flag_implausible_estimates(
         segment_col: Metadata column to segment by.
         yield_bounds: (min, max) kWh/kWp/year for plausible specific yield.
     """
-    if not _PV_AVAILABLE:
-        df = results.copy()
-        df["capacity_flag"] = "unknown"
-        return df
-
     # flag_implausible_estimates requires segment_stats; derive them here
     from re_nilm.portfolio.aggregation import compute_segment_stats
-    from pv_detection import compute_segment_stats as _compute_seg_stats
-    seg_stats = _compute_seg_stats(results, metadata, segment_col)
+
+    seg_stats = compute_segment_stats(results, metadata=metadata, segment_col=segment_col)
     return _flag_implausible_estimates(results, seg_stats, metadata, segment_col, yield_bounds)
 
 

@@ -10,6 +10,11 @@ pipeline:
   autosave_every_n_customers: 1000
   resume_from_checkpoint: true
   checkpoint_path: "data/processed/out/checkpoint.parquet"
+  # Set to false to allow the pipeline to run without weather data (AC, HP, battery
+  # detectors will return NaN features). True (default) aborts early on weather failure.
+  weather_required: true
+  skip_ac_disagg: false
+  skip_hp_disagg: false
 
 detectors:
   enabled:
@@ -30,9 +35,7 @@ models:
     prob_threshold: 0.55
     detector_path: "models/ac_detector_v1.joblib"
     disaggregator_path: "models/ac_disaggregator_v1.pkl"
-    inference_months: [6, 7, 8]
   heat_pump:
-    prob_threshold: 0.5
     detector_path: "models/hp_detector_v1.joblib"
     disaggregator_path: "models/hp_disaggregator_v1.joblib"
     night_rad_threshold: 20.0

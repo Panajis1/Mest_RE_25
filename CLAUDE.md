@@ -64,7 +64,7 @@ data/raw/re/*.parquet  +  weather (MeteoSwiss/Open-Meteo)
 - **Every step has its own checkpoint file** (`{step_name}_ckpt.parquet`). Steps do not share checkpoints so resuming one step doesn't skip another.
 - **Battery detection requires PV** (configurable via `enforce_pv_required`). The battery detector receives `pv_result` via `**context`.
 - **ML detectors (AC, HP) require trained models** at `models/ac_detector_v1.joblib` and `models/hp_detector_v1.joblib`. If not present, those steps are silently skipped and logged as warnings.
-- **AC disaggregation model** is pre-trained and lives at `models/ac_disaggregator_v1.pkl` (note: `.pkl` extension, not `.joblib`). It was trained on sklearn 1.8.0 — if the environment has a different sklearn version, the model may need to be retrained.
+- **AC disaggregation model** is pre-trained and lives at `models/ac_disaggregator_v1.pkl` (note: `.pkl` extension, not `.joblib`). It was trained on sklearn 1.3.0 — if the environment has a different sklearn version, the model may need to be retrained. `ac_detector_v1.joblib` and `hp_detector_v1.joblib` also require sklearn 1.3.x (pinned in `requirements.txt`).
 - **PV detection is unsupervised** (no model artifact needed) — runs immediately.
 - **HP detection** uses night-only features (`global_rad < 20 W/m²`). AC detection uses daytime features (`global_rad > 50 W/m²`). Both use the same underlying math in `re_nilm/features/load.py`.
 - **EV detection is fully heuristic** (no model artifact). `EVDetector` scores sustained flat-power load blocks (≥2.8 kW, ≥90 min, std/mean ≤ 0.15) using a soft probability over 5 signals. Source: `ev_scripts/newlogic_ev.ipynb`. `EVSessionEstimator` produces per-session detail for EV-positive customers. Tune `prob_threshold` (default 0.3) if detection rate is too high/low for your data.
@@ -103,7 +103,13 @@ re_nilm/
 
 ### Legacy code (model/, hp_model/, data/)
 
-The original detection scripts still live in `model/`, `hp_model/`, and `data/`. The `re_nilm` package delegates to them rather than duplicating. Full migration is a future task. Do not modify these files without checking what `re_nilm` imports from them.
+The original scripts still live in `model/`, `hp_model/`, and `data/` and are kept as reference / compatibility code.
+
+Current split:
+- **Now internal in `re_nilm`**: detector runtime logic for PV and battery (along with AC/HP/EV detector logic).
+- **Still delegated to legacy modules**: some estimators, portfolio utilities, visualizations, and trainer helpers.
+
+Do not modify legacy files without checking what `re_nilm` still imports from them.
 
 ### Python compatibility
 

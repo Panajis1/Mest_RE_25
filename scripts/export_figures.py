@@ -1,11 +1,26 @@
-"""Export portfolio result figures to the docs/figures/ directory.
+"""Export portfolio result figures from the pipeline output to docs/figures/.
 
-Merges export_results_figures.py and re_portfolio_report.py into a single
-config-driven script.
+Reads the joined results parquet produced by run_pipeline.py and generates
+summary visualisations (population statistics, capacity vs. production).
+Figures are written as PNG files.
+
+Prerequisites:
+    - Pipeline results at the path set by ``output.results_dir`` in the config
+      (default: ``data/processed/out/results_all_customers.parquet``).
+      Run ``run_pipeline.py`` first if these files are missing.
+
+Output:
+    docs/figures/results/appliance_adoption_shares.png
+    docs/figures/results/pv_installed_capacity_summary.png
+    docs/figures/results/pv_capacity_distribution.png
+    docs/figures/results/appliance_probability_distributions.png
+    docs/figures/results/appliance_cooccurrence_heatmap.png
+    docs/figures/results/technology_portfolio_summaries.png
+    docs/figures/results/pv_population_statistics.png
+    docs/figures/results/pv_capacity_vs_production.png
 
 Usage:
     python scripts/export_figures.py --config config/re_production.yaml
-    python scripts/export_figures.py --format html
 """
 
 from __future__ import annotations
@@ -21,8 +36,14 @@ if str(_REPO_ROOT) not in sys.path:
 
 from re_nilm.pipeline.orchestrator import load_config
 from re_nilm.visualization.portfolio import (
-    plot_population_statistics,
+    plot_appliance_adoption_shares,
+    plot_appliance_cooccurrence_heatmap,
+    plot_appliance_probability_distributions,
     plot_capacity_vs_production_with_ci,
+    plot_population_statistics,
+    plot_pv_capacity_distribution,
+    plot_pv_installed_capacity_summary,
+    plot_technology_portfolio_summaries,
     write_plotly_figures_to_dir,
 )
 
@@ -30,7 +51,6 @@ from re_nilm.visualization.portfolio import (
 def _parse_args():
     parser = argparse.ArgumentParser(description="Export RE-NILM portfolio figures")
     parser.add_argument("--config", default="config/re_production.yaml")
-    parser.add_argument("--format", default="png", choices=["png", "html"], dest="fmt")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser.parse_args()
 
@@ -59,7 +79,30 @@ def main():
 
     figures = []
 
+    for name, plotter in [
+        ("appliance_adoption_shares", plot_appliance_adoption_shares),
+        ("appliance_probability_distributions", plot_appliance_probability_distributions),
+        ("appliance_cooccurrence_heatmap", plot_appliance_cooccurrence_heatmap),
+        ("technology_portfolio_summaries", plot_technology_portfolio_summaries),
+    ]:
+        try:
+            figures.append((name, plotter(results)))
+        except Exception as exc:
+            logger.warning("%s failed: %s", name, exc)
+
     if "pv_capacity_kwp" in results.columns:
+        try:
+            fig = plot_pv_installed_capacity_summary(results)
+            figures.append(("pv_installed_capacity_summary", fig))
+        except Exception as exc:
+            logger.warning("plot_pv_installed_capacity_summary failed: %s", exc)
+
+        try:
+            fig = plot_pv_capacity_distribution(results, x_max_kwp=100.0)
+            figures.append(("pv_capacity_distribution", fig))
+        except Exception as exc:
+            logger.warning("plot_pv_capacity_distribution failed: %s", exc)
+
         try:
             fig = plot_population_statistics(results)
             figures.append(("pv_population_statistics", fig))
@@ -76,10 +119,10 @@ def main():
             logger.warning("plot_capacity_vs_production_with_ci failed: %s", exc)
 
     if not figures:
-        logger.warning("No figures generated — check that results contain PV columns")
+        logger.warning("No figures generated — check that results contain appliance result columns")
         return
 
-    write_plotly_figures_to_dir(figures, figures_dir, fmt=args.fmt)
+    write_plotly_figures_to_dir(figures, figures_dir, fmt="png")
     logger.info("%d figures written to %s", len(figures), figures_dir)
     print(f"\nExported {len(figures)} figures → {figures_dir}")
 

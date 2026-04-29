@@ -19,6 +19,7 @@ artifacts are missing — the pipeline can always run PV and battery.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -35,6 +36,70 @@ from re_nilm.estimators.pv_capacity import PVCapacityEstimator
 from re_nilm.pipeline.streaming import StreamingEngine
 
 logger = logging.getLogger(__name__)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_repo_path(path_like: str | Path) -> Path:
+    """Resolve config paths relative to repository root."""
+    p = Path(path_like)
+    return p if p.is_absolute() else (_REPO_ROOT / p).resolve()
+
+
+# ---------------------------------------------------------------------------
+# Per-worker state (multiprocessing support)
+#
+# ProcessPoolExecutor pickles each pool.submit(fn, arg) call independently.
+# Embedding large objects (index dict, weather DataFrame, sklearn model) inside
+# a closure or per-call callable means they get pickled once per customer —
+# O(n_customers × state_size) of serialisation overhead per batch.
+#
+# The initializer pattern avoids this: state is pickled once per *worker
+# process* at pool creation time, stored in a module-level dict, and accessed
+# by the thin module-level worker functions below.  In sequential mode
+# (n_workers <= 1) StreamingEngine calls the initializer once before the loop.
+# ---------------------------------------------------------------------------
+
+_WORKER_STATE: Dict[str, Any] = {}
+
+
+def _init_worker(state: Dict[str, Any]) -> None:
+    """Initialise per-process worker state. Called once per worker by ProcessPoolExecutor."""
+    global _WORKER_STATE
+    _WORKER_STATE = state
+
+
+def _detector_worker(cid: str) -> Optional[dict]:
+    """Generic detector worker — load customer data and call predict_customer."""
+    s = _WORKER_STATE
+    df = load_customer_from_index(cid, s["index"])
+    return s["detector"].predict_customer(df, s["weather_df"])
+
+
+def _pv_capacity_worker(cid: str) -> Optional[dict]:
+    """PV capacity worker — skip non-PV customers, run capacity estimator."""
+    s = _WORKER_STATE
+    det = s["pv_lookup"].get(cid, {"customer_id": cid, "has_pv": False})
+    if not det.get("has_pv", False):
+        return None
+    df = load_customer_from_index(cid, s["index"])
+    return s["estimator"].estimate(df, det, s["weather_df"])
+
+
+def _battery_worker(cid: str) -> Optional[dict]:
+    """Battery worker — run detector + capacity estimator, propagating PV result."""
+    s = _WORKER_STATE
+    pv_det = s["pv_lookup"].get(cid, {})
+    pv_cap = s["cap_lookup"].get(cid, {})
+    pv_ctx = {**pv_det, **pv_cap}
+    df = load_customer_from_index(cid, s["index"])
+    det = s["detector"].predict_customer(df, s["weather_df"], pv_result=pv_ctx)
+    if det is None:
+        return None
+    cap_est = s["estimator"].estimate(df, {**det, "pv_result": pv_ctx}, s["weather_df"])
+    combined = dict(det)
+    if cap_est:
+        combined.update({k: v for k, v in cap_est.items() if k != "customer_id"})
+    return combined
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +148,8 @@ class PipelineOrchestrator:
         config: Loaded config dict (from load_config()).
         enabled_detectors: Override which detectors to run. Defaults to config value.
         resume: Resume from checkpoint if True.
+        skip_ac_disagg: Skip AC 15-minute disaggregation while preserving scalar results.
+        skip_hp_disagg: Skip HP 15-minute disaggregation while preserving scalar results.
     """
 
     def __init__(
@@ -90,6 +157,8 @@ class PipelineOrchestrator:
         config: Dict[str, Any],
         enabled_detectors: Optional[List[str]] = None,
         resume: Optional[bool] = None,
+        skip_ac_disagg: Optional[bool] = None,
+        skip_hp_disagg: Optional[bool] = None,
     ):
         self.cfg = config
         self.enabled = set(
@@ -103,9 +172,19 @@ class PipelineOrchestrator:
         self._pipe_cfg = config.get("pipeline", {})
         self._models_cfg = config.get("models", {})
         self._output_cfg = config.get("output", {})
+        self.skip_ac_disagg = (
+            skip_ac_disagg
+            if skip_ac_disagg is not None
+            else bool(self._pipe_cfg.get("skip_ac_disagg", False))
+        )
+        self.skip_hp_disagg = (
+            skip_hp_disagg
+            if skip_hp_disagg is not None
+            else bool(self._pipe_cfg.get("skip_hp_disagg", False))
+        )
 
-        self.data_dir = Path(self._data_cfg.get("re_data_dir", "data/raw/re"))
-        self.output_dir = Path(self._output_cfg.get("results_dir", "data/processed/out"))
+        self.data_dir = _resolve_repo_path(self._data_cfg.get("re_data_dir", "data/raw/re"))
+        self.output_dir = _resolve_repo_path(self._output_cfg.get("results_dir", "data/processed/out"))
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -123,21 +202,60 @@ class PipelineOrchestrator:
         customer_ids = list(index.keys())
         logger.info("[Orchestrator] %d customers found", len(customer_ids))
 
+        self._check_weather_coverage(weather_df, index)
+
+        raw_workers = self._pipe_cfg.get("n_workers", 1)
+        n_workers = os.cpu_count() or 1 if raw_workers == "auto" else int(raw_workers)
+        logger.info("[Orchestrator] Using %d workers (cpu_count=%d)", n_workers, os.cpu_count() or 1)
+
         streaming_cfg = dict(
-            n_workers=self._pipe_cfg.get("n_workers", 1),
+            n_workers=n_workers,
             batch_size=self._pipe_cfg.get("batch_size", 500),
             resume=self.resume,
         )
 
-        pv_result = self._run_pv(customer_ids, index, weather_df, streaming_cfg)
-        cap_result = self._run_pv_capacity(customer_ids, index, weather_df, pv_result, streaming_cfg)
-        batt_result = self._run_battery(customer_ids, index, weather_df, cap_result, streaming_cfg)
-        ac_result = self._run_ac(customer_ids, index, weather_df, streaming_cfg)
-        hp_result = self._run_hp(customer_ids, index, weather_df, streaming_cfg)
-        ev_result = self._run_ev(customer_ids, index, weather_df, streaming_cfg)
+        allowed_ids = set(customer_ids)
+        pv_result = self._restrict_results_to_customers(
+            self._run_pv(customer_ids, index, weather_df, streaming_cfg),
+            allowed_ids,
+            "PV indicators",
+        )
+        cap_result = self._restrict_results_to_customers(
+            self._run_pv_capacity(customer_ids, index, weather_df, pv_result, streaming_cfg),
+            allowed_ids,
+            "PV capacity",
+        )
+        batt_result = self._restrict_results_to_customers(
+            self._run_battery(customer_ids, index, weather_df, pv_result, cap_result, streaming_cfg),
+            allowed_ids,
+            "Battery results",
+        )
+        ac_result = self._restrict_results_to_customers(
+            self._run_ac(customer_ids, index, weather_df, streaming_cfg),
+            allowed_ids,
+            "AC detection",
+        )
+        hp_result = self._restrict_results_to_customers(
+            self._run_hp(customer_ids, index, weather_df, streaming_cfg),
+            allowed_ids,
+            "HP detection",
+        )
+        ev_result = self._restrict_results_to_customers(
+            self._run_ev(customer_ids, index, weather_df, streaming_cfg),
+            allowed_ids,
+            "EV detection",
+        )
 
-        self._run_ac_disagg(customer_ids, index, weather_df, ac_result)
-        self._run_hp_disagg(customer_ids, index, weather_df, hp_result)
+        if self.skip_ac_disagg:
+            logger.info("[Orchestrator] AC disaggregation skipped by config/CLI")
+        else:
+            self._run_ac_disagg(customer_ids, index, weather_df, ac_result, cap_result)
+
+        if self.skip_hp_disagg:
+            logger.info("[Orchestrator] HP disaggregation skipped by config/CLI")
+        else:
+            self._run_hp_disagg(customer_ids, index, weather_df, hp_result, cap_result)
+
         self._run_ev_sessions(customer_ids, index, weather_df, ev_result)
 
         combined = self._join_scalar_results(pv_result, cap_result, batt_result, ac_result, hp_result, ev_result)
@@ -151,17 +269,33 @@ class PipelineOrchestrator:
     # ------------------------------------------------------------------
 
     def _load_weather(self) -> pd.DataFrame:
-        weather_cache = self.output_dir / "weather_cache.parquet"
+        weather_required: bool = self._pipe_cfg.get("weather_required", True)
         loader = WeatherLoader(backend="meteoswiss", cache_dir=self.output_dir)
         try:
             return loader.load()
         except Exception as exc:
-            logger.warning("[Orchestrator] Weather load failed (%s) — weather columns will be NaN", exc)
+            if weather_required:
+                raise RuntimeError(
+                    "Weather load failed and pipeline.weather_required is true. "
+                    "Fix weather access or set weather_required: false in config to allow "
+                    "degraded mode (AC, HP, battery detectors will return NaN features). "
+                    f"Original error: {exc}"
+                ) from exc
+            logger.warning(
+                "[Orchestrator] Weather load failed (%s) — running in degraded mode. "
+                "Set pipeline.weather_required: true to make weather failures fatal.",
+                exc,
+            )
             return pd.DataFrame(columns=["dt_utc", "t_2m_C", "global_rad_W"])
 
     def _build_index(self) -> Dict[str, List[str]]:
         cache_path = self.output_dir / "customer_file_index.json"
-        return build_customer_file_index(self.data_dir, cache_path=cache_path)
+        return build_customer_file_index(
+            self.data_dir,
+            cache_path=cache_path,
+            customer_type_filter=self._data_cfg.get("customer_type_filter", "Particuliers"),
+            max_consumption_kwh=self._data_cfg.get("max_consumption_kwh", 100_000),
+        )
 
     def _make_engine(self, output_path: Path, streaming_cfg: dict) -> StreamingEngine:
         # Each pipeline step uses its own checkpoint derived from its output path so
@@ -180,6 +314,90 @@ class PipelineOrchestrator:
             return load_customer_from_index(cid, index), weather_df
         return _load
 
+    def _restrict_results_to_customers(
+        self,
+        df: pd.DataFrame,
+        allowed_ids: set[str],
+        label: str,
+    ) -> pd.DataFrame:
+        """Keep resumed result tables aligned with the filtered customer index."""
+        if df.empty or "customer_id" not in df.columns:
+            return df
+        before = len(df)
+        out = df[df["customer_id"].astype(str).isin(allowed_ids)].copy()
+        if len(out) != before:
+            logger.info(
+                "[Orchestrator] %s restricted to filtered cohort: %d/%d rows",
+                label,
+                len(out),
+                before,
+            )
+        return out
+
+    def _check_weather_coverage(self, weather_df: pd.DataFrame, index: Dict) -> None:
+        """Warn if weather data does not cover the smart meter date range.
+
+        Samples up to 10 unique parquet files from the index to estimate the
+        smart meter min/max date, then compares against weather_df's dt_utc range.
+        Logs a WARNING if either end has a gap larger than 30 days.
+        """
+        if weather_df.empty or not index:
+            return
+
+        # Collect up to 10 unique parquet file paths across all customers.
+        seen_files: set = set()
+        for paths in index.values():
+            seen_files.update(paths)
+            if len(seen_files) >= 10:
+                break
+
+        meter_min: Optional[pd.Timestamp] = None
+        meter_max: Optional[pd.Timestamp] = None
+        for path in list(seen_files)[:10]:
+            try:
+                ts = pd.to_datetime(pd.read_parquet(path, columns=["DT_UTC"])["DT_UTC"])
+                local_min, local_max = ts.min(), ts.max()
+                if meter_min is None or local_min < meter_min:
+                    meter_min = local_min
+                if meter_max is None or local_max > meter_max:
+                    meter_max = local_max
+            except Exception:
+                continue
+
+        if meter_min is None:
+            logger.warning("[Orchestrator] Could not sample smart meter dates — skipping weather coverage check.")
+            return
+
+        # Normalise both sides to tz-naive for comparison.
+        def _strip_tz(t: pd.Timestamp) -> pd.Timestamp:
+            return t.tz_localize(None) if t.tzinfo is not None else t
+
+        meter_min = _strip_tz(meter_min)
+        meter_max = _strip_tz(meter_max)
+
+        weather_ts = pd.to_datetime(weather_df["dt_utc"])
+        weather_min = _strip_tz(weather_ts.min())
+        weather_max = _strip_tz(weather_ts.max())
+
+        gap_start = max(0.0, (weather_min - meter_min).total_seconds() / 86400)
+        gap_end = max(0.0, (meter_max - weather_max).total_seconds() / 86400)
+
+        if gap_start > 30 or gap_end > 30:
+            logger.warning(
+                "[Orchestrator] Weather coverage gap: smart meter spans %s–%s but weather spans "
+                "%s–%s (gap: %.0f days at start, %.0f days at end). "
+                "Weather-dependent detectors (AC, HP, battery) may produce NaN features.",
+                meter_min.date(), meter_max.date(),
+                weather_min.date(), weather_max.date(),
+                gap_start, gap_end,
+            )
+        else:
+            logger.info(
+                "[Orchestrator] Weather coverage OK: weather %s–%s covers smart meter ~%s–%s.",
+                weather_min.date(), weather_max.date(),
+                meter_min.date(), meter_max.date(),
+            )
+
     def _run_pv(self, customer_ids, index, weather_df, streaming_cfg) -> pd.DataFrame:
         out_path = self.output_dir / "pv_indicators.parquet"
         if "pv" not in self.enabled:
@@ -195,12 +413,12 @@ class PipelineOrchestrator:
             min_yearly_prod_kwh=pv_cfg.get("min_yearly_prod_kwh", 1.0),
         )
 
-        def processor(cid: str):
-            df = load_customer_from_index(cid, index)
-            return detector.predict_customer(df, weather_df)
-
+        worker_state = {"detector": detector, "index": index, "weather_df": weather_df}
         engine = self._make_engine(out_path, streaming_cfg)
-        result = engine.run(customer_ids, processor, out_path)
+        result = engine.run(
+            customer_ids, _detector_worker, out_path,
+            worker_initializer=_init_worker, worker_initargs=(worker_state,),
+        )
         logger.info("[Orchestrator] PV detection: %d customers, %d PV-positive",
                     len(result), int(result["has_pv"].sum()) if "has_pv" in result.columns else 0)
         return result
@@ -223,19 +441,19 @@ class PipelineOrchestrator:
         # Use drop=False so customer_id remains in the dict values after set_index
         pv_lookup = pv_result.set_index("customer_id", drop=False).to_dict("index") if not pv_result.empty else {}
 
-        def processor(cid: str):
-            det = pv_lookup.get(cid, {"customer_id": cid, "has_pv": False})
-            if not det.get("has_pv", False):
-                return None
-            df = load_customer_from_index(cid, index)
-            return estimator.estimate(df, det, weather_df)
-
+        worker_state = {
+            "estimator": estimator, "pv_lookup": pv_lookup,
+            "index": index, "weather_df": weather_df,
+        }
         engine = self._make_engine(out_path, streaming_cfg)
-        result = engine.run(list(pv_pos), processor, out_path)
+        result = engine.run(
+            list(pv_pos), _pv_capacity_worker, out_path,
+            worker_initializer=_init_worker, worker_initargs=(worker_state,),
+        )
         logger.info("[Orchestrator] PV capacity: %d estimates", len(result))
         return result
 
-    def _run_battery(self, customer_ids, index, weather_df, cap_result, streaming_cfg) -> pd.DataFrame:
+    def _run_battery(self, customer_ids, index, weather_df, pv_result, cap_result, streaming_cfg) -> pd.DataFrame:
         out_path = self.output_dir / "battery_results.parquet"
         if "battery" not in self.enabled:
             return pd.DataFrame(columns=["customer_id", "has_battery", "prob_battery"])
@@ -255,22 +473,19 @@ class PipelineOrchestrator:
             capacity_max_kwh=batt_cfg.get("capacity_max_kwh", 30.0),
         )
 
-        cap_lookup = cap_result.set_index("customer_id").to_dict("index") if not cap_result.empty else {}
+        pv_lookup = pv_result.set_index("customer_id", drop=False).to_dict("index") if not pv_result.empty else {}
+        cap_lookup = cap_result.set_index("customer_id", drop=False).to_dict("index") if not cap_result.empty else {}
 
-        def processor(cid: str):
-            pv_cap = cap_lookup.get(cid, {})
-            df = load_customer_from_index(cid, index)
-            det = detector.predict_customer(df, weather_df, pv_result=pv_cap)
-            if det is None:
-                return None
-            cap_est = estimator.estimate(df, {**det, "pv_result": pv_cap}, weather_df)
-            combined = dict(det)
-            if cap_est:
-                combined.update({k: v for k, v in cap_est.items() if k != "customer_id"})
-            return combined
-
+        worker_state = {
+            "detector": detector, "estimator": estimator,
+            "pv_lookup": pv_lookup, "cap_lookup": cap_lookup,
+            "index": index, "weather_df": weather_df,
+        }
         engine = self._make_engine(out_path, streaming_cfg)
-        result = engine.run(customer_ids, processor, out_path)
+        result = engine.run(
+            customer_ids, _battery_worker, out_path,
+            worker_initializer=_init_worker, worker_initargs=(worker_state,),
+        )
         logger.info("[Orchestrator] Battery detection: %d customers, %d positive",
                     len(result), int(result.get("has_battery", pd.Series()).sum()) if "has_battery" in result.columns else 0)
         return result
@@ -293,15 +508,16 @@ class PipelineOrchestrator:
         detector = ACDetector.load(
             detector_path,
             prob_threshold=ac_cfg.get("prob_threshold", 0.55),
-            inference_months=ac_cfg.get("inference_months", [6, 7, 8]),
+            day_rad_threshold=float(ac_cfg.get("day_rad_threshold", 50.0)),
+            min_day_rows=int(ac_cfg.get("min_day_rows", 100)),
         )
 
-        def processor(cid: str):
-            df = load_customer_from_index(cid, index)
-            return detector.predict_customer(df, weather_df)
-
+        worker_state = {"detector": detector, "index": index, "weather_df": weather_df}
         engine = self._make_engine(out_path, streaming_cfg)
-        result = engine.run(customer_ids, processor, out_path)
+        result = engine.run(
+            customer_ids, _detector_worker, out_path,
+            worker_initializer=_init_worker, worker_initargs=(worker_state,),
+        )
         logger.info("[Orchestrator] AC detection: %d customers, %d positive",
                     len(result), int(result["has_ac"].sum()) if "has_ac" in result.columns else 0)
         return result
@@ -323,21 +539,28 @@ class PipelineOrchestrator:
         from re_nilm.detectors.heat_pump import HeatPumpDetector
         detector = HeatPumpDetector.load(
             detector_path,
-            prob_threshold=hp_cfg.get("prob_threshold", 0.5),
             night_rad_threshold=hp_cfg.get("night_rad_threshold", 20.0),
+            min_night_rows=int(hp_cfg.get("min_night_rows", 100)),
         )
 
-        def processor(cid: str):
-            df = load_customer_from_index(cid, index)
-            return detector.predict_customer(df, weather_df)
-
+        worker_state = {"detector": detector, "index": index, "weather_df": weather_df}
         engine = self._make_engine(out_path, streaming_cfg)
-        result = engine.run(customer_ids, processor, out_path)
+        result = engine.run(
+            customer_ids, _detector_worker, out_path,
+            worker_initializer=_init_worker, worker_initargs=(worker_state,),
+        )
         logger.info("[Orchestrator] HP detection: %d customers, %d positive",
                     len(result), int(result["has_hp"].sum()) if "has_hp" in result.columns else 0)
         return result
 
-    def _run_ac_disagg(self, customer_ids, index, weather_df, ac_result: pd.DataFrame):
+    def _run_ac_disagg(
+        self,
+        customer_ids,
+        index,
+        weather_df,
+        ac_result: pd.DataFrame,
+        cap_result: pd.DataFrame,
+    ):
         out_path = self.output_dir / "ac_disagg_15min.parquet"
         if "ac" not in self.enabled or ac_result.empty or "has_ac" not in ac_result.columns:
             return
@@ -361,10 +584,20 @@ class PipelineOrchestrator:
         ac_pos = ac_result[ac_result["has_ac"] == True]
         ac_lookup = ac_pos.set_index("customer_id", drop=False).to_dict("index")
 
+        # Build {customer_id → pv_capacity_kwp} for PV correction in _build_features.
+        # Customers absent from cap_result (no PV) get 0.0, preserving existing behaviour.
+        cap_lookup: Dict[str, float] = {}
+        if not cap_result.empty and "customer_id" in cap_result.columns and "pv_capacity_kwp" in cap_result.columns:
+            for _, row in cap_result[["customer_id", "pv_capacity_kwp"]].iterrows():
+                kwp = row["pv_capacity_kwp"]
+                if pd.notna(kwp) and kwp > 0.0:
+                    cap_lookup[str(row["customer_id"])] = float(kwp)
+
         all_frames: List[pd.DataFrame] = []
         for cid in ac_lookup:
             df = load_customer_from_index(cid, index)
-            result = estimator.estimate(df, ac_lookup[cid], weather_df)
+            pv_capacity_kwp = cap_lookup.get(str(cid), 0.0)
+            result = estimator.estimate(df, ac_lookup[cid], weather_df, pv_capacity_kwp=pv_capacity_kwp)
             if result and "ac_disagg_15min" in result:
                 all_frames.append(result["ac_disagg_15min"])
 
@@ -373,7 +606,14 @@ class PipelineOrchestrator:
             out.to_parquet(out_path, index=False)
             logger.info("[Orchestrator] AC disagg written: %d rows → %s", len(out), out_path)
 
-    def _run_hp_disagg(self, customer_ids, index, weather_df, hp_result: pd.DataFrame):
+    def _run_hp_disagg(
+        self,
+        customer_ids,
+        index,
+        weather_df,
+        hp_result: pd.DataFrame,
+        cap_result: pd.DataFrame,
+    ):
         out_path = self.output_dir / "hp_disagg_15min.parquet"
         if "heat_pump" not in self.enabled or hp_result.empty or "hp_type" not in hp_result.columns:
             return
@@ -393,10 +633,20 @@ class PipelineOrchestrator:
         winter_hp = hp_result[hp_result["hp_type"] == "winter_hp"]
         hp_lookup = winter_hp.set_index("customer_id", drop=False).to_dict("index")
 
+        # Build {customer_id → pv_capacity_kwp} for PV correction in _build_features.
+        # Customers absent from cap_result (no PV) get 0.0, preserving existing behaviour.
+        cap_lookup: Dict[str, float] = {}
+        if not cap_result.empty and "customer_id" in cap_result.columns and "pv_capacity_kwp" in cap_result.columns:
+            for _, row in cap_result[["customer_id", "pv_capacity_kwp"]].iterrows():
+                kwp = row["pv_capacity_kwp"]
+                if pd.notna(kwp) and kwp > 0.0:
+                    cap_lookup[str(row["customer_id"])] = float(kwp)
+
         all_frames: List[pd.DataFrame] = []
         for cid in hp_lookup:
             df = load_customer_from_index(cid, index)
-            result = estimator.estimate(df, hp_lookup[cid], weather_df)
+            pv_capacity_kwp = cap_lookup.get(str(cid), 0.0)
+            result = estimator.estimate(df, hp_lookup[cid], weather_df, pv_capacity_kwp=pv_capacity_kwp)
             if result and "hp_disagg_15min" in result:
                 all_frames.append(result["hp_disagg_15min"])
 
@@ -423,12 +673,12 @@ class PipelineOrchestrator:
             max_rel_std=ev_cfg.get("max_rel_std", 0.15),
         )
 
-        def processor(cid: str):
-            df = load_customer_from_index(cid, index)
-            return detector.predict_customer(df, weather_df)
-
+        worker_state = {"detector": detector, "index": index, "weather_df": weather_df}
         engine = self._make_engine(out_path, streaming_cfg)
-        result = engine.run(customer_ids, processor, out_path)
+        result = engine.run(
+            customer_ids, _detector_worker, out_path,
+            worker_initializer=_init_worker, worker_initargs=(worker_state,),
+        )
         n_pos = int(result["has_ev"].sum()) if "has_ev" in result.columns else 0
         logger.info("[Orchestrator] EV detection: %d customers, %d EV-positive", len(result), n_pos)
         return result

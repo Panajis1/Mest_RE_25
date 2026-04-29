@@ -3,7 +3,7 @@
 These replace the nearly-identical extract_tot_features() implementations that
 existed independently in ac_actrainingfunctions.py and hp_detection_functions.py.
 The key difference between AC and HP is the row-filtering step:
-  - HP: filter to night-only rows (global_rad < night_rad_threshold)
+  - HP: filter to night-only rows (global_rad <= night_rad_threshold)
   - AC: filter to daytime rows (global_rad > day_rad_threshold)
 Both use the same underlying math here.
 """
@@ -145,7 +145,8 @@ def extract_hp_features(
     Returns None if there are insufficient night rows.
     """
     rad = pd.to_numeric(global_rad, errors="coerce")
-    night_mask = rad.notna() & (rad < night_rad_threshold)
+    # Legacy hp_detection_functions uses <= for the night radiation cutoff.
+    night_mask = rad.notna() & (rad <= night_rad_threshold)
     n_night = int(night_mask.sum())
     if n_night < min_night_rows:
         return None
@@ -173,82 +174,94 @@ def extract_ac_features(
     global_rad: pd.Series,
     timestamps: pd.Series,
     day_rad_threshold: float = 50.0,
-    min_day_rows: int = 50,
-    hot_thresh: float = 28.0,
+    min_day_rows: int = 100,
+    hot_thresh: float = 25.0,   # matches TEMP_HOT=25.0 in ac_actrainingfunctions.py
+    cold_thresh: float = 10.0,
 ) -> dict[str, float] | None:
     """Extract AC-detection features matching ac_actrainingfunctions.py:extract_tot_features().
 
-    Uses daytime rows for correlated features; falls back to full curve when
-    insufficient daytime data is available.
+    All seasonal and time-of-day features are computed on the daytime subset
+    (global_rad > day_rad_threshold), falling back to the full curve when fewer
+    than min_day_rows are available. This matches the original extract_tot_features
+    behaviour where d_feat is the daytime-filtered DataFrame used for everything.
+
+    daytime_share is the exception: it compares day vs night load from the full
+    input curve, exactly as the original code does with its full 'd' variable.
     """
     rad = pd.to_numeric(global_rad, errors="coerce")
     day_mask = rad.notna() & (rad > day_rad_threshold)
     n_day = int(day_mask.sum())
     used_daytime = n_day >= min_day_rows
 
+    # d_feat equivalent: daytime rows (or full curve as fallback)
     lo = load[day_mask] if used_daytime else load
     te = temp[day_mask] if used_daytime else temp
+    ra = rad[day_mask] if used_daytime else rad
     ts = timestamps[day_mask] if used_daytime else timestamps
 
-    dt = pd.to_datetime(timestamps)
-    months = dt.dt.month
-    hours = dt.dt.hour
+    dt_lo = pd.to_datetime(ts)
+    months_lo = dt_lo.dt.month
+    hours_lo = dt_lo.dt.hour
 
-    corr_feats = corr_with_temperature(lo, te, hot_thresh=hot_thresh)
+    summer_mask = months_lo.isin([6, 7, 8])
+    winter_mask = months_lo.isin([12, 1, 2])
+    spring_mask = months_lo.isin([3, 4, 5])
+    hot_mask = te > hot_thresh
+    cold_mask = te < cold_thresh
 
-    # Radiation correlation (AC follows sun)
-    corr_rad, _ = safe_corr(lo, rad[day_mask] if used_daytime else rad)
-    corr_rad_all = corr_rad if corr_rad is not None else np.nan
+    corr_temp_all, _ = safe_corr(lo, te)
+    corr_temp_hot, _ = safe_corr(lo[hot_mask], te[hot_mask])
+    corr_rad_all, _ = safe_corr(lo, ra)
 
-    summer_mask = months.isin([6, 7, 8])
-    spring_mask = months.isin([3, 4, 5])
-    hot_mask_all = temp > hot_thresh
+    mean_summer = safe_mean(lo[summer_mask])
+    mean_winter = safe_mean(lo[winter_mask])
+    mean_spring = safe_mean(lo[spring_mask])
+    mean_hot = safe_mean(lo[hot_mask])
+    mean_cold = safe_mean(lo[cold_mask])
+    total_load = safe_mean(lo)
 
-    mean_summer = safe_mean(load[summer_mask])
-    mean_total = safe_mean(load)
-    mean_spring = safe_mean(load[spring_mask])
-    mean_hot = safe_mean(load[hot_mask_all])
+    season_balance_val = bounded_balance(mean_summer, mean_winter)
+    thermal_balance_val = bounded_balance(mean_hot, mean_cold)
 
-    # Summer share: how much of mean annual load falls in summer
-    summer_share_val = float(mean_summer / (abs(mean_total) + _EPS)) if not np.isnan(mean_summer) and not np.isnan(mean_total) else np.nan
+    summer_share_val = float(mean_summer / (abs(total_load) + _EPS)) if not np.isnan(mean_summer) and not np.isnan(total_load) else np.nan
+    summer_vs_spring_val = float(mean_summer / (mean_spring + _EPS)) if not np.isnan(mean_summer) and not np.isnan(mean_spring) else np.nan
+    hot_load_ratio_val = float(mean_hot / (abs(total_load) + _EPS)) if not np.isnan(mean_hot) and not np.isnan(total_load) else np.nan
 
-    # Afternoon peak ratio: 14-18h mean / total mean
-    afternoon_mask = hours.isin([14, 15, 16, 17, 18])
-    mean_afternoon = safe_mean(load[afternoon_mask])
-    afternoon_peak_ratio = float(mean_afternoon / (abs(mean_total) + _EPS)) if not np.isnan(mean_afternoon) and not np.isnan(mean_total) else np.nan
+    # daytime_share uses the full curve (day vs night split), not the daytime subset
+    day_rows_all = load[rad.notna() & (rad > day_rad_threshold)]
+    night_rows_all = load[rad.notna() & (rad <= day_rad_threshold)]
+    daytime_share_val = bounded_balance(safe_mean(day_rows_all), safe_mean(night_rows_all))
 
-    # Peak summer hour
-    summer_load = load[summer_mask]
-    summer_hours = hours[summer_mask]
+    coeff_var_val = coeff_var(lo)
+    acf = autocorrelations(lo, lags=[4, 96])
+
+    afternoon_mask = hours_lo.isin([14, 15, 16, 17, 18])
+    mean_afternoon = safe_mean(lo[afternoon_mask])
+    afternoon_peak_ratio_val = float(mean_afternoon / (abs(total_load) + _EPS)) if not np.isnan(mean_afternoon) and not np.isnan(total_load) else np.nan
+
+    summer_load = lo[summer_mask]
+    summer_hours = hours_lo[summer_mask]
     if not summer_load.empty and summer_load.notna().any():
         tmp = pd.DataFrame({"load": summer_load.values, "hour": summer_hours.values})
-        peak_summer_hour = float(tmp.groupby("hour")["load"].mean().idxmax())
+        peak_summer_hour_val = float(tmp.groupby("hour")["load"].mean().idxmax())
     else:
-        peak_summer_hour = np.nan
+        peak_summer_hour_val = np.nan
 
-    # Summer vs spring ratio
-    summer_vs_spring = float(mean_summer / (mean_spring + _EPS)) if not np.isnan(mean_summer) and not np.isnan(mean_spring) else np.nan
-
-    # Hot load ratio: mean on hot days / total mean
-    hot_load_ratio = float(mean_hot / (abs(mean_total) + _EPS)) if not np.isnan(mean_hot) and not np.isnan(mean_total) else np.nan
-
-    feats: dict[str, float] = {
-        "corr_temp_all": corr_feats["corr_temp_all"],
-        "corr_temp_hot": corr_feats["corr_temp_hot"],
-        "corr_rad_all": corr_rad_all,
-        "season_balance": season_balance(lo, ts),
-        "thermal_balance": thermal_balance(lo, te, hot_thresh=hot_thresh),
+    return {
+        "corr_temp_all": corr_temp_all if corr_temp_all is not None else np.nan,
+        "corr_temp_hot": corr_temp_hot if corr_temp_hot is not None else np.nan,
+        "corr_rad_all": corr_rad_all if corr_rad_all is not None else np.nan,
+        "season_balance": season_balance_val,
+        "thermal_balance": thermal_balance_val,
         "summer_share": summer_share_val,
-        "daytime_share": daytime_share(load, global_rad, day_rad_threshold),
-        "coeff_var": coeff_var(lo),
+        "daytime_share": daytime_share_val,
+        "coeff_var": coeff_var_val,
+        "acf_1h": acf["acf_4steps"],
+        "acf_24h": acf["acf_96steps"],
+        "afternoon_peak_ratio": afternoon_peak_ratio_val,
+        "peak_summer_hour": peak_summer_hour_val,
+        "summer_vs_spring": summer_vs_spring_val,
+        "hot_load_ratio": hot_load_ratio_val,
+        "used_daytime_only": int(used_daytime),
+        "n_day_rows": n_day,
     }
-    acf = autocorrelations(lo, lags=[4, 96])
-    feats["acf_1h"] = acf["acf_4steps"]
-    feats["acf_24h"] = acf["acf_96steps"]
-    feats["afternoon_peak_ratio"] = afternoon_peak_ratio
-    feats["peak_summer_hour"] = peak_summer_hour
-    feats["summer_vs_spring"] = summer_vs_spring
-    feats["hot_load_ratio"] = hot_load_ratio
-    feats["used_daytime_only"] = int(used_daytime)
-    feats["n_day_rows"] = n_day
-    return feats
