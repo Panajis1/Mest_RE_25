@@ -30,3 +30,8 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["re_nilm*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: end-to-end tests that run the full pipeline on synthetic data",
+]
