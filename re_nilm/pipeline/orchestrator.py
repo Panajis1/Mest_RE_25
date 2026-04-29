@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -159,6 +160,8 @@ class PipelineOrchestrator:
         resume: Optional[bool] = None,
         skip_ac_disagg: Optional[bool] = None,
         skip_hp_disagg: Optional[bool] = None,
+        pv_bootstrap_n: Optional[int] = None,
+        skip_pv_capacity: Optional[bool] = None,
     ):
         self.cfg = config
         self.enabled = set(
@@ -181,6 +184,12 @@ class PipelineOrchestrator:
             skip_hp_disagg
             if skip_hp_disagg is not None
             else bool(self._pipe_cfg.get("skip_hp_disagg", False))
+        )
+        self.pv_bootstrap_n = pv_bootstrap_n
+        self.skip_pv_capacity = (
+            skip_pv_capacity
+            if skip_pv_capacity is not None
+            else bool(self._pipe_cfg.get("skip_pv_capacity", False))
         )
 
         self.data_dir = _resolve_repo_path(self._data_cfg.get("re_data_dir", "data/raw/re"))
@@ -212,6 +221,10 @@ class PipelineOrchestrator:
             n_workers=n_workers,
             batch_size=self._pipe_cfg.get("batch_size", 500),
             resume=self.resume,
+            memory_limit_mb=float(self._pipe_cfg.get("memory_limit_mb", 0.0) or 0.0),
+            write_mode=self._pipe_cfg.get("write_mode", "parts"),
+            keep_part_files=bool(self._pipe_cfg.get("keep_part_files", False)),
+            checkpoint_format=self._pipe_cfg.get("checkpoint_format", "text"),
         )
 
         allowed_ids = set(customer_ids)
@@ -306,6 +319,10 @@ class PipelineOrchestrator:
             batch_size=streaming_cfg["batch_size"],
             resume=streaming_cfg["resume"],
             checkpoint_path=ckpt,
+            memory_limit_mb=streaming_cfg["memory_limit_mb"],
+            write_mode=streaming_cfg["write_mode"],
+            keep_part_files=streaming_cfg["keep_part_files"],
+            checkpoint_format=streaming_cfg["checkpoint_format"],
         )
 
     def _customer_loader(self, index: Dict, weather_df: pd.DataFrame):
@@ -333,6 +350,41 @@ class PipelineOrchestrator:
                 before,
             )
         return out
+
+    def _timeseries_parts_dir(self, output_path: Path) -> Path:
+        return output_path.with_name(f"{output_path.stem}_parts")
+
+    def _write_timeseries_part(self, frames: List[pd.DataFrame], output_path: Path, part_index: int) -> int:
+        if not frames:
+            return part_index
+        parts_dir = self._timeseries_parts_dir(output_path)
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        part_path = parts_dir / f"part-{part_index:06d}.parquet"
+        tmp_path = parts_dir / f"part-{part_index:06d}.tmp.parquet"
+        pd.concat(frames, ignore_index=True).to_parquet(tmp_path, index=False)
+        tmp_path.replace(part_path)
+        return part_index + 1
+
+    def _compact_timeseries_parts(self, output_path: Path) -> int:
+        parts_dir = self._timeseries_parts_dir(output_path)
+        part_paths = sorted(parts_dir.glob("part-*.parquet"))
+        if not part_paths:
+            return 0
+        frames = [pd.read_parquet(path) for path in part_paths]
+        out = pd.concat(frames, ignore_index=True)
+        tmp_path = output_path.with_suffix(".tmp.parquet")
+        out.to_parquet(tmp_path, index=False)
+        tmp_path.replace(output_path)
+        if not bool(self._pipe_cfg.get("keep_part_files", False)):
+            shutil.rmtree(parts_dir, ignore_errors=True)
+        return len(out)
+
+    def _iter_with_progress(self, customer_ids, desc: str):
+        try:
+            from tqdm import tqdm
+            return tqdm(list(customer_ids), desc=desc)
+        except ImportError:
+            return customer_ids
 
     def _check_weather_coverage(self, weather_df: pd.DataFrame, index: Dict) -> None:
         """Warn if weather data does not cover the smart meter date range.
@@ -427,13 +479,18 @@ class PipelineOrchestrator:
         out_path = self.output_dir / "pv_capacity.parquet"
         if "pv" not in self.enabled:
             return pd.DataFrame(columns=["customer_id", "pv_capacity_kwp"])
+        if self.skip_pv_capacity:
+            logger.info("[Orchestrator] PV capacity skipped by config/CLI")
+            return pd.DataFrame(columns=["customer_id", "pv_capacity_kwp"])
         if out_path.exists() and self.resume:
             logger.info("[Orchestrator] PV capacity already exists — skipping")
             return pd.read_parquet(out_path)
 
         pv_cfg = self._models_cfg.get("pv", {})
+        bootstrap_n = self.pv_bootstrap_n if self.pv_bootstrap_n is not None else pv_cfg.get("capacity_bootstrap_n", 200)
+        logger.info("[Orchestrator] PV capacity bootstrap_n=%s", bootstrap_n)
         estimator = PVCapacityEstimator(
-            bootstrap_n=pv_cfg.get("capacity_bootstrap_n", 200),
+            bootstrap_n=bootstrap_n,
             capacity_min_kwp=pv_cfg.get("capacity_min_kwp", 0.1),
         )
 
@@ -593,18 +650,24 @@ class PipelineOrchestrator:
                 if pd.notna(kwp) and kwp > 0.0:
                     cap_lookup[str(row["customer_id"])] = float(kwp)
 
-        all_frames: List[pd.DataFrame] = []
-        for cid in ac_lookup:
+        shutil.rmtree(self._timeseries_parts_dir(out_path), ignore_errors=True)
+        frame_buffer: List[pd.DataFrame] = []
+        part_index = 0
+        part_size = int(self._pipe_cfg.get("disagg_part_size", 100))
+        for cid in self._iter_with_progress(ac_lookup, "AC disagg"):
             df = load_customer_from_index(cid, index)
             pv_capacity_kwp = cap_lookup.get(str(cid), 0.0)
             result = estimator.estimate(df, ac_lookup[cid], weather_df, pv_capacity_kwp=pv_capacity_kwp)
             if result and "ac_disagg_15min" in result:
-                all_frames.append(result["ac_disagg_15min"])
+                frame_buffer.append(result["ac_disagg_15min"])
+                if len(frame_buffer) >= part_size:
+                    part_index = self._write_timeseries_part(frame_buffer, out_path, part_index)
+                    frame_buffer.clear()
 
-        if all_frames:
-            out = pd.concat(all_frames, ignore_index=True)
-            out.to_parquet(out_path, index=False)
-            logger.info("[Orchestrator] AC disagg written: %d rows → %s", len(out), out_path)
+        part_index = self._write_timeseries_part(frame_buffer, out_path, part_index)
+        n_rows = self._compact_timeseries_parts(out_path)
+        if n_rows:
+            logger.info("[Orchestrator] AC disagg written: %d rows → %s", n_rows, out_path)
 
     def _run_hp_disagg(
         self,
@@ -642,18 +705,24 @@ class PipelineOrchestrator:
                 if pd.notna(kwp) and kwp > 0.0:
                     cap_lookup[str(row["customer_id"])] = float(kwp)
 
-        all_frames: List[pd.DataFrame] = []
-        for cid in hp_lookup:
+        shutil.rmtree(self._timeseries_parts_dir(out_path), ignore_errors=True)
+        frame_buffer: List[pd.DataFrame] = []
+        part_index = 0
+        part_size = int(self._pipe_cfg.get("disagg_part_size", 100))
+        for cid in self._iter_with_progress(hp_lookup, "HP disagg"):
             df = load_customer_from_index(cid, index)
             pv_capacity_kwp = cap_lookup.get(str(cid), 0.0)
             result = estimator.estimate(df, hp_lookup[cid], weather_df, pv_capacity_kwp=pv_capacity_kwp)
             if result and "hp_disagg_15min" in result:
-                all_frames.append(result["hp_disagg_15min"])
+                frame_buffer.append(result["hp_disagg_15min"])
+                if len(frame_buffer) >= part_size:
+                    part_index = self._write_timeseries_part(frame_buffer, out_path, part_index)
+                    frame_buffer.clear()
 
-        if all_frames:
-            out = pd.concat(all_frames, ignore_index=True)
-            out.to_parquet(out_path, index=False)
-            logger.info("[Orchestrator] HP disagg written: %d rows → %s", len(out), out_path)
+        part_index = self._write_timeseries_part(frame_buffer, out_path, part_index)
+        n_rows = self._compact_timeseries_parts(out_path)
+        if n_rows:
+            logger.info("[Orchestrator] HP disagg written: %d rows → %s", n_rows, out_path)
 
     def _run_ev(self, customer_ids, index, weather_df, streaming_cfg) -> pd.DataFrame:
         out_path = self.output_dir / "ev_detection.parquet"
@@ -701,17 +770,23 @@ class PipelineOrchestrator:
         ev_pos = ev_result[ev_result["has_ev"] == True]
         ev_lookup = ev_pos.set_index("customer_id", drop=False).to_dict("index")
 
-        all_frames: List[pd.DataFrame] = []
-        for cid in ev_lookup:
+        shutil.rmtree(self._timeseries_parts_dir(out_path), ignore_errors=True)
+        frame_buffer: List[pd.DataFrame] = []
+        part_index = 0
+        part_size = int(self._pipe_cfg.get("disagg_part_size", 100))
+        for cid in self._iter_with_progress(ev_lookup, "EV sessions"):
             df = load_customer_from_index(cid, index)
             result = estimator.estimate(df, ev_lookup[cid], weather_df)
             if result and "ev_sessions" in result:
-                all_frames.append(result["ev_sessions"])
+                frame_buffer.append(result["ev_sessions"])
+                if len(frame_buffer) >= part_size:
+                    part_index = self._write_timeseries_part(frame_buffer, out_path, part_index)
+                    frame_buffer.clear()
 
-        if all_frames:
-            out = pd.concat(all_frames, ignore_index=True)
-            out.to_parquet(out_path, index=False)
-            logger.info("[Orchestrator] EV sessions written: %d rows → %s", len(out), out_path)
+        part_index = self._write_timeseries_part(frame_buffer, out_path, part_index)
+        n_rows = self._compact_timeseries_parts(out_path)
+        if n_rows:
+            logger.info("[Orchestrator] EV sessions written: %d rows → %s", n_rows, out_path)
 
     def _join_scalar_results(
         self,

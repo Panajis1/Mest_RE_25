@@ -17,3 +17,7 @@ detectors:
     - ac
     - heat_pump
     - ev
+
+models:
+  pv:
+    capacity_bootstrap_n: 10

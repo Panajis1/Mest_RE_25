@@ -10,11 +10,17 @@ pipeline:
   autosave_every_n_customers: 1000
   resume_from_checkpoint: true
   checkpoint_path: "data/processed/out/checkpoint.parquet"
+  write_mode: "parts"
+  keep_part_files: false
+  checkpoint_format: "text"
+  memory_limit_mb: 6000
+  disagg_part_size: 100
   # Set to false to allow the pipeline to run without weather data (AC, HP, battery
   # detectors will return NaN features). True (default) aborts early on weather failure.
   weather_required: true
   skip_ac_disagg: false
   skip_hp_disagg: false
+  skip_pv_capacity: false
 
 detectors:
   enabled:
@@ -30,6 +36,7 @@ models:
     delta_net_threshold: -0.1
     min_yearly_prod_kwh: 1.0
     capacity_bootstrap_n: 200
+    capacity_bootstrap_n_fast: 50
     capacity_min_kwp: 0.1
   ac:
     prob_threshold: 0.55

@@ -15,6 +15,7 @@ __pycache__/
 .idea/
 .vscode/
 .cursor/
+CLAUDE.md
 
 # Environment variables (secrets)
 .env

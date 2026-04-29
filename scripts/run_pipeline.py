@@ -90,6 +90,18 @@ def _parse_args():
         default=None,
         help="Skip heat-pump 15-minute disaggregation while still joining scalar HP detection results",
     )
+    parser.add_argument(
+        "--pv-bootstrap-n",
+        type=int,
+        default=None,
+        help="Override PV capacity bootstrap iterations for this run (e.g. 50 for laptop iteration)",
+    )
+    parser.add_argument(
+        "--skip-pv-capacity",
+        action="store_true",
+        default=None,
+        help="Skip PV capacity estimation while still running/joining PV detection results",
+    )
     return parser.parse_args()
 
 
@@ -112,6 +124,8 @@ def main():
         resume=args.resume,
         skip_ac_disagg=args.skip_ac_disagg,
         skip_hp_disagg=args.skip_hp_disagg,
+        pv_bootstrap_n=args.pv_bootstrap_n,
+        skip_pv_capacity=args.skip_pv_capacity,
     )
     results = orchestrator.run()
     print(f"\nPipeline complete — {len(results)} customers processed.")

@@ -186,7 +186,11 @@ def plot_pv_installed_capacity_summary(
         float(pd.to_numeric(results.loc[valid, "pv_ci_upper"], errors="coerce").fillna(cap_valid).sum())
         if "pv_ci_upper" in results.columns else total_kwp
     )
-    n_pv = int(valid.sum())
+    n_capacity = int(valid.sum())
+    n_detected = (
+        int(_bool_series(results["has_pv"]).sum())
+        if "has_pv" in results.columns else n_capacity
+    )
     stats = {
         "mean_kwp": float(cap_valid.mean()),
         "median_kwp": float(cap_valid.median()),
@@ -205,7 +209,8 @@ def plot_pv_installed_capacity_summary(
             thickness=1.5,
         ),
         customdata=[[
-            n_pv,
+            n_detected,
+            n_capacity,
             lower_kwp / 1000.0,
             upper_kwp / 1000.0,
             stats["mean_kwp"],
@@ -216,11 +221,12 @@ def plot_pv_installed_capacity_summary(
         hovertemplate=(
             "<b>PV portfolio</b><br>"
             "Total: %{y:.2f} MWp<br>"
-            "95% CI: %{customdata[1]:.2f}-%{customdata[2]:.2f} MWp<br>"
-            "PV customers: %{customdata[0]:,.0f}<br>"
-            "Mean: %{customdata[3]:.1f} kWp<br>"
-            "Median: %{customdata[4]:.1f} kWp<br>"
-            "IQR: %{customdata[5]:.1f}-%{customdata[6]:.1f} kWp"
+            "95% CI: %{customdata[2]:.2f}-%{customdata[3]:.2f} MWp<br>"
+            "PV detected: %{customdata[0]:,.0f}<br>"
+            "Capacity estimates: %{customdata[1]:,.0f}<br>"
+            "Mean: %{customdata[4]:.1f} kWp<br>"
+            "Median: %{customdata[5]:.1f} kWp<br>"
+            "IQR: %{customdata[6]:.1f}-%{customdata[7]:.1f} kWp"
             "<extra></extra>"
         ),
     ))
@@ -230,7 +236,8 @@ def plot_pv_installed_capacity_summary(
         yaxis_title="Installed capacity (MWp)",
         annotations=[dict(
             text=(
-                f"PV customers: {n_pv:,}<br>"
+                f"PV detected: {n_detected:,}<br>"
+                f"Capacity estimates: {n_capacity:,}<br>"
                 f"Mean / median: {stats['mean_kwp']:.1f} / {stats['median_kwp']:.1f} kWp"
             ),
             x=0.5,
