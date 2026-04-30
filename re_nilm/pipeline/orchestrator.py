@@ -306,7 +306,7 @@ class PipelineOrchestrator:
         return build_customer_file_index(
             self.data_dir,
             cache_path=cache_path,
-            customer_type_filter=self._data_cfg.get("customer_type_filter", "Particuliers"),
+            customer_type_filter=self._data_cfg.get("customer_type_filter"),
             max_consumption_kwh=self._data_cfg.get("max_consumption_kwh", 100_000),
         )
 

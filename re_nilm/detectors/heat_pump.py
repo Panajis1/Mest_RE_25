@@ -133,8 +133,14 @@ class HeatPumpDetector(AbstractDetector):
         try:
             pred = int(self.model.predict(X)[0])
             prob_hp = _prob_hp_winter_plus_summer(self.model, X)
-        except Exception:
-            return None
+        except Exception as exc:
+            return {
+                "customer_id": customer_id,
+                "has_hp": False,
+                "prob_hp": 0.0,
+                "hp_type": "no_hp",
+                "error": f"hp_predict_failed: {exc}",
+            }
 
         hp_type = _INT_TO_LABEL.get(pred, "no_hp")
         has_hp = hp_type != "no_hp"

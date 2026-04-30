@@ -18,21 +18,22 @@ from re_nilm.features.pv_daily import build_customer_daily_features, compute_dai
 
 _STC_FACTOR = 4000.0  # (kWh/15min)/(W/m²) → kWp
 
-# Pre-computed once per process; keyed by weather DataFrame id to avoid recomputation.
-_daily_weather_cache: dict = {}
 
+def _compute_daily_weather_cached(weather: pd.DataFrame, cache: dict) -> pd.DataFrame:
+    """Compute the daily weather summary, caching the result on the supplied dict.
 
-def _get_daily_weather(weather: pd.DataFrame) -> pd.DataFrame:
-    """Compute and cache the daily weather summary used by pv_detection capacity functions."""
+    Cache is keyed by id(weather); the caller owns the dict's lifetime, so the
+    cache is bounded by the estimator instance (not module-global).
+    """
     key = id(weather)
-    if key not in _daily_weather_cache:
+    if key not in cache:
         w_indexed = weather.set_index("dt_utc")
         w_indexed.index.name = "timestamp"
-        _daily_weather_cache[key] = compute_daily_weather(w_indexed)
-    return _daily_weather_cache[key]
+        cache[key] = compute_daily_weather(w_indexed)
+    return cache[key]
 
 
-def _make_cust_days(customer_ts: pd.DataFrame, weather: pd.DataFrame):
+def _make_cust_days(customer_ts: pd.DataFrame, weather: pd.DataFrame, daily_weather_cache: dict):
     """Build (merged_15min, daily) DataFrames that match what pv_detection expects.
 
     Uses compute_daily_weather + build_customer_daily_features from pv_detection.py
@@ -55,7 +56,7 @@ def _make_cust_days(customer_ts: pd.DataFrame, weather: pd.DataFrame):
     )
     merged["date"] = merged["DT_UTC"].dt.date
 
-    daily_weather = _get_daily_weather(weather)
+    daily_weather = _compute_daily_weather_cached(weather, daily_weather_cache)
     daily = build_customer_daily_features(merged, daily_weather)
     return merged, daily
 
@@ -78,6 +79,7 @@ class PVCapacityEstimator(AbstractEstimator):
         self.bootstrap_n = bootstrap_n
         self.capacity_min_kwp = capacity_min_kwp
         self.confidence_level = confidence_level
+        self._daily_weather_cache: dict = {}
 
     def estimate(
         self,
@@ -91,7 +93,7 @@ class PVCapacityEstimator(AbstractEstimator):
             return None
 
         try:
-            merged, daily = _make_cust_days(customer_ts, weather)
+            merged, daily = _make_cust_days(customer_ts, weather, self._daily_weather_cache)
             point = _capacity_and_sc_from_data(merged, daily)
             cap_samples, sc_samples = _bootstrap_capacity_and_sc(
                 merged,
@@ -106,9 +108,10 @@ class PVCapacityEstimator(AbstractEstimator):
 
         hybrid_kwp = point.get("pv_capacity_hybrid_kwp", np.nan)
 
+        ci_lo_pct = (1.0 - self.confidence_level) / 2.0 * 100
+        ci_hi_pct = 100.0 - ci_lo_pct
+
         if cap_samples is not None and len(cap_samples) > 0:
-            ci_lo_pct = (1.0 - self.confidence_level) / 2.0 * 100
-            ci_hi_pct = 100.0 - ci_lo_pct
             ci_lower_kwp = float(np.nanpercentile(cap_samples, ci_lo_pct)) * _STC_FACTOR
             ci_upper_kwp = float(np.nanpercentile(cap_samples, ci_hi_pct)) * _STC_FACTOR
         else:

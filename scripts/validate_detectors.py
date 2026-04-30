@@ -283,8 +283,8 @@ def _old_battery_per_customer(
                 "has_pv_prob": pv.get("has_pv_prob", np.nan),
             }
             res = analyze_battery_residential_v7(d, weather_idx, pv_row)
-            prob_raw = float(res.get("battery_prob", 0.0))
-            prob = prob_raw / 100.0 if prob_raw > 1.0 else prob_raw
+            # battery_prob from analyze_battery_residential_v7 is always in percent (0–100).
+            prob = float(res.get("battery_prob", 0.0)) / 100.0
             results[cid] = {
                 "has_battery": prob >= 0.5,
                 "prob_battery": prob,
