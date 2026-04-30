@@ -38,18 +38,23 @@ def plot_pv_detection_summary(
     """Build a 3-panel matplotlib Figure summarising the PV portfolio.
 
     Panels (left to right):
-      1. Pie chart of `has_pv` vs `no_pv` with percentages and total user count.
-      2. Aggregated installed capacity (MWp) with summed lower/upper CI as
-         asymmetric error bars. Annotated with detected/estimate counts and
-         mean/median per-customer kWp.
-      3. Aggregated self-consumption: median portfolio `sc_share` with IQR as
-         the error bar, plus n customers and the mean.
+      1. Pie chart of `has_pv` vs `no_pv` over the full population, with
+         percentages and total user count.
+      2. Aggregated installed capacity (MWp) computed only over
+         `has_pv == True` customers, with summed CI bounds as error bars.
+         Annotated with the same n_PV count + mean/median per-customer kWp.
+      3. Aggregated self-consumption restricted to `has_pv == True`
+         customers (NaN sc_share dropped): median sc_share with IQR as the
+         error bar, annotated with n_PV and the mean.
+
+    All stat panels share one denominator — the number of PV-positive
+    customers — so the counts are directly comparable.
 
     Args:
         results: Per-customer joined results table. Required columns:
             `has_pv`. Recommended: `pv_capacity_kwp`, `pv_ci_lower`,
-            `pv_ci_upper`, `sc_share` (any missing column is gracefully
-            replaced by an annotation explaining what's absent).
+            `pv_ci_upper`, `sc_share`. Missing columns produce an
+            annotated empty panel rather than raising.
         title: Suptitle for the figure.
 
     Returns:
@@ -60,16 +65,14 @@ def plot_pv_detection_summary(
     if "has_pv" not in results.columns:
         raise ValueError("results must include 'has_pv'")
 
+    pv_mask = _bool_series(results["has_pv"])
+    pv_only = results.loc[pv_mask].copy()
+    n_pv = int(pv_mask.sum())
+
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.6))
-
-    # --- Panel 1: PV ratio pie -------------------------------------------------
-    _draw_pv_ratio_pie(axes[0], results)
-
-    # --- Panel 2: aggregate capacity ------------------------------------------
-    _draw_aggregate_capacity_bar(axes[1], results)
-
-    # --- Panel 3: aggregate self-consumption ----------------------------------
-    _draw_aggregate_sc_bar(axes[2], results)
+    _draw_pv_ratio_pie(axes[0], results, pv_mask)
+    _draw_aggregate_capacity_bar(axes[1], pv_only, n_pv)
+    _draw_aggregate_sc_bar(axes[2], pv_only, n_pv)
 
     fig.suptitle(title, fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.94])
@@ -81,10 +84,11 @@ def plot_pv_detection_summary(
 # ---------------------------------------------------------------------------
 
 
-def _draw_pv_ratio_pie(ax, results: pd.DataFrame) -> None:
-    has = _bool_series(results["has_pv"])
-    n_total = int(has.notna().sum())
-    n_pv = int(has.sum())
+def _draw_pv_ratio_pie(ax, results: pd.DataFrame, pv_mask: Optional[pd.Series] = None) -> None:
+    if pv_mask is None:
+        pv_mask = _bool_series(results["has_pv"])
+    n_total = int(pv_mask.notna().sum())
+    n_pv = int(pv_mask.sum())
     n_no = max(0, n_total - n_pv)
     if n_total == 0:
         ax.set_title("Overall PV ratio\n(no customers)")
@@ -110,8 +114,14 @@ def _draw_pv_ratio_pie(ax, results: pd.DataFrame) -> None:
     ax.set_title(f"Overall PV ratio\n(n={n_total:,} users)", fontsize=12)
 
 
-def _draw_aggregate_capacity_bar(ax, results: pd.DataFrame) -> None:
-    if "pv_capacity_kwp" not in results.columns:
+def _draw_aggregate_capacity_bar(ax, pv_only: pd.DataFrame, n_pv: int) -> None:
+    """Aggregate capacity over the PV-positive subset (n_pv customers).
+
+    pv_only is already pre-filtered to has_pv == True. Capacity values that
+    are NaN or non-positive within that subset are excluded from the sum
+    (and counted separately so the annotation is honest).
+    """
+    if "pv_capacity_kwp" not in pv_only.columns:
         ax.text(0.5, 0.5, "pv_capacity_kwp not in results",
                 ha="center", va="center", transform=ax.transAxes, fontsize=11)
         ax.set_title("Aggregated PV capacity")
@@ -119,34 +129,31 @@ def _draw_aggregate_capacity_bar(ax, results: pd.DataFrame) -> None:
         ax.set_yticks([])
         return
 
-    cap = pd.to_numeric(results["pv_capacity_kwp"], errors="coerce")
+    cap = pd.to_numeric(pv_only["pv_capacity_kwp"], errors="coerce")
     valid = cap.notna() & (cap > 0)
     cap_valid = cap.loc[valid]
     if cap_valid.empty:
-        ax.text(0.5, 0.5, "No positive capacity estimates",
+        ax.text(0.5, 0.5, "No positive capacity estimates among PV customers",
                 ha="center", va="center", transform=ax.transAxes, fontsize=11)
         ax.set_title("Aggregated PV capacity")
         return
 
     total_kwp = float(cap_valid.sum())
     lower_kwp = (
-        float(pd.to_numeric(results.loc[valid, "pv_ci_lower"], errors="coerce").fillna(cap_valid).sum())
-        if "pv_ci_lower" in results.columns else total_kwp
+        float(pd.to_numeric(pv_only.loc[valid, "pv_ci_lower"], errors="coerce").fillna(cap_valid).sum())
+        if "pv_ci_lower" in pv_only.columns else total_kwp
     )
     upper_kwp = (
-        float(pd.to_numeric(results.loc[valid, "pv_ci_upper"], errors="coerce").fillna(cap_valid).sum())
-        if "pv_ci_upper" in results.columns else total_kwp
+        float(pd.to_numeric(pv_only.loc[valid, "pv_ci_upper"], errors="coerce").fillna(cap_valid).sum())
+        if "pv_ci_upper" in pv_only.columns else total_kwp
     )
     err_lo = max(0.0, total_kwp - lower_kwp) / 1000.0
     err_hi = max(0.0, upper_kwp - total_kwp) / 1000.0
 
     n_estimates = int(valid.sum())
-    n_detected = (
-        int(_bool_series(results["has_pv"]).sum())
-        if "has_pv" in results.columns else n_estimates
-    )
     mean_kwp = float(cap_valid.mean())
     median_kwp = float(cap_valid.median())
+    missing = n_pv - n_estimates
 
     ax.bar(
         ["PV portfolio"],
@@ -166,9 +173,10 @@ def _draw_aggregate_capacity_bar(ax, results: pd.DataFrame) -> None:
         f"{total_kwp / 1000.0:.1f} MWp  (CI {lower_kwp / 1000.0:.1f}–{upper_kwp / 1000.0:.1f} MWp)",
         fontsize=12,
     )
+    extra = f"  ({missing:,} missing capacity)" if missing > 0 else ""
     ax.text(
         0.5, 0.96,
-        f"detected: {n_detected:,}   estimates: {n_estimates:,}\n"
+        f"PV customers: {n_pv:,}{extra}\n"
         f"mean / median: {mean_kwp:.1f} / {median_kwp:.1f} kWp",
         transform=ax.transAxes, ha="center", va="top",
         fontsize=10, color="#444",
@@ -180,17 +188,23 @@ def _draw_aggregate_capacity_bar(ax, results: pd.DataFrame) -> None:
     ax.spines["right"].set_visible(False)
 
 
-def _draw_aggregate_sc_bar(ax, results: pd.DataFrame) -> None:
-    if "sc_share" not in results.columns:
+def _draw_aggregate_sc_bar(ax, pv_only: pd.DataFrame, n_pv: int) -> None:
+    """Aggregate self-consumption over the PV-positive subset (n_pv customers).
+
+    Restricted to has_pv == True so the denominator matches the capacity panel.
+    NaN sc_share values within that subset are excluded from the median/IQR
+    computation but reported via the "missing" annotation.
+    """
+    if "sc_share" not in pv_only.columns:
         ax.text(0.5, 0.5, "sc_share not in results",
                 ha="center", va="center", transform=ax.transAxes, fontsize=11)
         ax.set_title("Aggregated self-consumption")
         return
 
-    sc = pd.to_numeric(results["sc_share"], errors="coerce").dropna()
-    sc = sc[(sc >= 0) & (sc <= 1)]
+    sc = pd.to_numeric(pv_only["sc_share"], errors="coerce")
+    sc = sc[(sc.notna()) & (sc >= 0) & (sc <= 1)]
     if sc.empty:
-        ax.text(0.5, 0.5, "No self-consumption values in [0, 1]",
+        ax.text(0.5, 0.5, "No self-consumption values among PV customers",
                 ha="center", va="center", transform=ax.transAxes, fontsize=11)
         ax.set_title("Aggregated self-consumption")
         return
@@ -199,6 +213,7 @@ def _draw_aggregate_sc_bar(ax, results: pd.DataFrame) -> None:
     p25 = float(sc.quantile(0.25))
     p75 = float(sc.quantile(0.75))
     mean_sc = float(sc.mean())
+    missing = n_pv - len(sc)
 
     ax.bar(
         ["Self-consumption"],
@@ -219,9 +234,10 @@ def _draw_aggregate_sc_bar(ax, results: pd.DataFrame) -> None:
         f"median {median_sc * 100:.1f}%  (IQR {p25 * 100:.1f}–{p75 * 100:.1f}%)",
         fontsize=12,
     )
+    extra = f"  ({missing:,} missing sc_share)" if missing > 0 else ""
     ax.text(
         0.5, 0.96,
-        f"n customers: {len(sc):,}\nmean: {mean_sc * 100:.1f}%",
+        f"PV customers: {n_pv:,}{extra}\nmean: {mean_sc * 100:.1f}%",
         transform=ax.transAxes, ha="center", va="top",
         fontsize=10, color="#444",
     )
