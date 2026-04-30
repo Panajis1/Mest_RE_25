@@ -13,6 +13,7 @@ Output:
     docs/figures/results/appliance_adoption_shares.png
     docs/figures/results/pv_installed_capacity_summary.png
     docs/figures/results/pv_capacity_distribution.png
+    docs/figures/results/pv_detection_summary.png         # 3-panel matplotlib PNG
     docs/figures/results/appliance_probability_distributions.png
     docs/figures/results/appliance_cooccurrence_heatmap.png
     docs/figures/results/technology_portfolio_summaries.png
@@ -46,6 +47,7 @@ from re_nilm.visualization.portfolio import (
     plot_technology_portfolio_summaries,
     write_plotly_figures_to_dir,
 )
+from re_nilm.visualization.pv_summary import save_pv_detection_summary
 
 
 def _parse_args():
@@ -123,6 +125,20 @@ def main():
         return
 
     write_plotly_figures_to_dir(figures, figures_dir, fmt="png")
+
+    # Standalone matplotlib 3-panel PV summary (pie + capacity + sc) — written
+    # directly because it isn't a plotly Figure. Kept independent so a missing
+    # matplotlib import doesn't break the rest of the export pipeline.
+    if "has_pv" in results.columns:
+        try:
+            out = save_pv_detection_summary(
+                results,
+                figures_dir / "pv_detection_summary.png",
+            )
+            logger.info("PV detection summary written → %s", out)
+        except Exception as exc:
+            logger.warning("pv_detection_summary failed: %s", exc)
+
     logger.info("%d figures written to %s", len(figures), figures_dir)
     print(f"\nExported {len(figures)} figures → {figures_dir}")
 
