@@ -366,18 +366,53 @@ class PipelineOrchestrator:
         return part_index + 1
 
     def _compact_timeseries_parts(self, output_path: Path) -> int:
+        """Stream-compact part-NNNNNN.parquet files into a single output file.
+
+        Uses pyarrow's ParquetWriter so peak memory is bounded to one part file
+        at a time (~150 MB at default disagg_part_size=100), instead of holding
+        every part in pandas + the concat result simultaneously. The previous
+        implementation caused 30+ GB peaks on 23k-customer 15-min disagg runs.
+
+        Falls back to the legacy pandas concat path if pyarrow isn't available
+        or if part schemas diverge in a way ParquetWriter rejects.
+        """
         parts_dir = self._timeseries_parts_dir(output_path)
         part_paths = sorted(parts_dir.glob("part-*.parquet"))
         if not part_paths:
             return 0
-        frames = [pd.read_parquet(path) for path in part_paths]
-        out = pd.concat(frames, ignore_index=True)
+
         tmp_path = output_path.with_suffix(".tmp.parquet")
-        out.to_parquet(tmp_path, index=False)
+        n_rows = 0
+        try:
+            import pyarrow.parquet as pq
+            writer = None
+            try:
+                for path in part_paths:
+                    table = pq.read_table(path)
+                    if writer is None:
+                        writer = pq.ParquetWriter(tmp_path, table.schema)
+                    writer.write_table(table)
+                    n_rows += table.num_rows
+                    del table  # release before reading the next part
+            finally:
+                if writer is not None:
+                    writer.close()
+        except Exception as exc:
+            # Fall back to the pandas path, which is correct but memory-hungry.
+            logger.warning(
+                "[Orchestrator] pyarrow streaming compaction failed (%s); "
+                "falling back to pandas concat path", exc,
+            )
+            tmp_path.unlink(missing_ok=True)
+            frames = [pd.read_parquet(path) for path in part_paths]
+            out = pd.concat(frames, ignore_index=True)
+            out.to_parquet(tmp_path, index=False)
+            n_rows = len(out)
+
         tmp_path.replace(output_path)
         if not bool(self._pipe_cfg.get("keep_part_files", False)):
             shutil.rmtree(parts_dir, ignore_errors=True)
-        return len(out)
+        return n_rows
 
     def _iter_with_progress(self, customer_ids, desc: str):
         try:

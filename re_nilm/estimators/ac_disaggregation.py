@@ -122,6 +122,21 @@ class ACDisaggregationEstimator(AbstractEstimator):
     def __init__(self, model, feature_cols: Optional[List[str]] = None):
         self.model = model
         self.feature_cols = feature_cols
+        # Cache the dt-normalised + sorted weather frame so it isn't rebuilt
+        # per customer. Keyed by id(weather_df); cache lifetime matches this
+        # estimator instance (one cache entry per unique weather DF identity).
+        self._weather_sorted_cache: dict = {}
+
+    def _get_sorted_weather(self, weather: pd.DataFrame) -> pd.DataFrame:
+        key = id(weather)
+        cached = self._weather_sorted_cache.get(key)
+        if cached is not None:
+            return cached
+        wdf = weather.copy()
+        wdf["dt_utc"] = wdf["dt_utc"].astype("datetime64[us]")
+        wdf = wdf.sort_values("dt_utc")
+        self._weather_sorted_cache[key] = wdf
+        return wdf
 
     @classmethod
     def load(cls, path: Path, features_path: Optional[Path] = None, **kwargs) -> "ACDisaggregationEstimator":
@@ -166,9 +181,7 @@ class ACDisaggregationEstimator(AbstractEstimator):
 
         # Normalize to datetime64[us] — pandas 2.x merge_asof requires identical units
         df["DT_UTC"] = df["DT_UTC"].astype("datetime64[us]")
-        wdf = weather.copy()
-        wdf["dt_utc"] = wdf["dt_utc"].astype("datetime64[us]")
-        wdf = wdf.sort_values("dt_utc")
+        wdf = self._get_sorted_weather(weather)
         merged = pd.merge_asof(
             df.rename(columns={"DT_UTC": "dt_utc"}),
             wdf,
