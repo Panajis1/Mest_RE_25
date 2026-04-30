@@ -260,3 +260,91 @@ def save_pv_detection_summary(
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return output_path
+
+
+def plot_pv_capacity_vs_sc_share(
+    results: pd.DataFrame,
+    title: str = "System Size vs. Self-Consumption Share",
+    sc_floor: float = 1e-6,
+):
+    """Scatter of estimated PV capacity vs self-consumption share.
+
+    Restricted to ``has_pv == True`` customers (consistent with the 3-panel
+    summary's stat panels). Self-consumption is plotted on a log scale;
+    values below ``sc_floor`` are clamped to that floor so they appear at
+    the bottom edge instead of silently disappearing on the log axis.
+
+    Args:
+        results: Per-customer joined results table.
+        title: Plot title.
+        sc_floor: Lower clip for sc_share so 0 / near-zero values remain
+            visible on the log axis. The y-axis label reflects this floor.
+
+    Returns:
+        matplotlib.figure.Figure.
+    """
+    import matplotlib.pyplot as plt
+
+    if "has_pv" not in results.columns:
+        raise ValueError("results must include 'has_pv'")
+    if "pv_capacity_kwp" not in results.columns or "sc_share" not in results.columns:
+        raise ValueError("results must include 'pv_capacity_kwp' and 'sc_share'")
+
+    pv = results.loc[_bool_series(results["has_pv"])]
+    cap = pd.to_numeric(pv["pv_capacity_kwp"], errors="coerce")
+    sc = pd.to_numeric(pv["sc_share"], errors="coerce")
+    valid = cap.notna() & (cap > 0) & sc.notna() & (sc >= 0)
+    cap = cap.loc[valid]
+    sc = sc.loc[valid].clip(lower=sc_floor, upper=1.0)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    if cap.empty:
+        ax.text(0.5, 0.5, "No PV customers with capacity + sc_share",
+                ha="center", va="center", transform=ax.transAxes, fontsize=11)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        return fig
+
+    ax.scatter(
+        cap, sc,
+        s=14, alpha=0.45,
+        color=_BAR_CAPACITY,
+        edgecolors="none",
+    )
+    ax.set_yscale("log")
+    ax.set_ylim(sc_floor, 1.5)
+    ax.set_xlim(0, float(cap.max()) * 1.03)
+    ax.set_xlabel("Estimated PV capacity (kWp)", fontsize=11)
+    ax.set_ylabel(f"Self-consumption share (log scale, ≥{sc_floor:g})", fontsize=11)
+    ax.set_title(title, fontsize=13, fontweight="bold")
+    ax.grid(True, which="both", axis="both", alpha=0.2, linewidth=0.6)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    n_pts = len(cap)
+    n_floored = int((sc <= sc_floor * 1.01).sum())
+    extra = f"  ({n_floored:,} clipped to floor)" if n_floored else ""
+    ax.text(
+        0.99, 0.02,
+        f"n PV customers: {n_pts:,}{extra}",
+        transform=ax.transAxes, ha="right", va="bottom",
+        fontsize=10, color="#444",
+    )
+    fig.tight_layout()
+    return fig
+
+
+def save_pv_capacity_vs_sc_share(
+    results: pd.DataFrame,
+    output_path: Path,
+    title: str = "System Size vs. Self-Consumption Share",
+    dpi: int = 150,
+) -> Path:
+    """Render the capacity-vs-sc scatter and write it to ``output_path`` as PNG."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig = plot_pv_capacity_vs_sc_share(results, title=title)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return output_path

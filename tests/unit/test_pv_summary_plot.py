@@ -12,7 +12,9 @@ matplotlib = pytest.importorskip("matplotlib")
 matplotlib.use("Agg")  # non-interactive backend for CI
 
 from re_nilm.visualization.pv_summary import (
+    plot_pv_capacity_vs_sc_share,
     plot_pv_detection_summary,
+    save_pv_capacity_vs_sc_share,
     save_pv_detection_summary,
 )
 
@@ -72,3 +74,46 @@ def test_plot_pv_detection_summary_handles_missing_sc():
 def test_plot_pv_detection_summary_requires_has_pv():
     with pytest.raises(ValueError, match="has_pv"):
         plot_pv_detection_summary(pd.DataFrame({"customer_id": ["c0"]}))
+
+
+def test_plot_pv_capacity_vs_sc_share_renders():
+    fig = plot_pv_capacity_vs_sc_share(_synthetic_results())
+    try:
+        ax = fig.axes[0]
+        assert ax.get_yscale() == "log"
+        assert "Self-consumption" in ax.get_ylabel()
+        assert "PV capacity" in ax.get_xlabel()
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+
+def test_plot_pv_capacity_vs_sc_share_clips_zero_to_floor():
+    """sc_share == 0 must be visible at the floor, not silently dropped."""
+    df = _synthetic_results()
+    df.loc[df["has_pv"], "sc_share"] = 0.0  # everyone has zero self-consumption
+    fig = plot_pv_capacity_vs_sc_share(df, sc_floor=1e-6)
+    try:
+        # The scatter should have points (n PV customers), all at the floor.
+        scatter = fig.axes[0].collections[0]
+        offsets = scatter.get_offsets()
+        assert len(offsets) == int(df["has_pv"].sum())
+        ys = offsets[:, 1]
+        assert (ys <= 1e-6 * 1.01).all()
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+
+def test_save_pv_capacity_vs_sc_share_writes_png(tmp_path):
+    out = tmp_path / "scatter.png"
+    written = save_pv_capacity_vs_sc_share(_synthetic_results(), out)
+    assert written == out
+    assert out.exists()
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert out.stat().st_size > 5_000
+
+
+def test_plot_pv_capacity_vs_sc_share_requires_columns():
+    with pytest.raises(ValueError, match="pv_capacity_kwp"):
+        plot_pv_capacity_vs_sc_share(pd.DataFrame({"has_pv": [True], "sc_share": [0.5]}))

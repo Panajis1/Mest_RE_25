@@ -47,7 +47,10 @@ from re_nilm.visualization.portfolio import (
     plot_technology_portfolio_summaries,
     write_plotly_figures_to_dir,
 )
-from re_nilm.visualization.pv_summary import save_pv_detection_summary
+from re_nilm.visualization.pv_summary import (
+    save_pv_capacity_vs_sc_share,
+    save_pv_detection_summary,
+)
 
 
 def _parse_args():
@@ -126,9 +129,9 @@ def main():
 
     write_plotly_figures_to_dir(figures, figures_dir, fmt="png")
 
-    # Standalone matplotlib 3-panel PV summary (pie + capacity + sc) — written
-    # directly because it isn't a plotly Figure. Kept independent so a missing
-    # matplotlib import doesn't break the rest of the export pipeline.
+    # Standalone matplotlib PV plots — written directly because they aren't
+    # plotly Figures. Kept independent so a missing matplotlib import doesn't
+    # break the rest of the export pipeline.
     if "has_pv" in results.columns:
         try:
             out = save_pv_detection_summary(
@@ -138,6 +141,16 @@ def main():
             logger.info("PV detection summary written → %s", out)
         except Exception as exc:
             logger.warning("pv_detection_summary failed: %s", exc)
+
+        if "pv_capacity_kwp" in results.columns and "sc_share" in results.columns:
+            try:
+                out = save_pv_capacity_vs_sc_share(
+                    results,
+                    figures_dir / "pv_capacity_vs_sc_share.png",
+                )
+                logger.info("PV capacity-vs-sc scatter written → %s", out)
+            except Exception as exc:
+                logger.warning("pv_capacity_vs_sc_share failed: %s", exc)
 
     logger.info("%d figures written to %s", len(figures), figures_dir)
     print(f"\nExported {len(figures)} figures → {figures_dir}")
