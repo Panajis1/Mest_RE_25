@@ -82,6 +82,24 @@ def main():
     results = pd.read_parquet(results_path)
     logger.info("Loaded %d customers from %s", len(results), results_path)
 
+    # If a previous pipeline run skipped PV (or wrote results before the
+    # join was extended), the joined parquet may be missing the PV columns
+    # while the per-step files still exist. Augment from those step files
+    # so the PV plots can use the correct has_pv / pv_capacity / sc_share.
+    pv_ind_path = results_dir / "pv_indicators.parquet"
+    if pv_ind_path.exists() and "has_pv" not in results.columns:
+        pv_ind = pd.read_parquet(pv_ind_path)
+        before = len(results.columns)
+        results = results.merge(pv_ind, on="customer_id", how="outer")
+        logger.info("Merged %s (+%d cols)", pv_ind_path.name, len(results.columns) - before)
+
+    pv_cap_path = results_dir / "pv_capacity.parquet"
+    if pv_cap_path.exists() and "pv_capacity_kwp" not in results.columns:
+        pv_cap = pd.read_parquet(pv_cap_path)
+        before = len(results.columns)
+        results = results.merge(pv_cap, on="customer_id", how="outer")
+        logger.info("Merged %s (+%d cols)", pv_cap_path.name, len(results.columns) - before)
+
     figures = []
 
     for name, plotter in [

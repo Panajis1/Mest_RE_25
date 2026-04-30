@@ -1,9 +1,10 @@
 """Matplotlib 3-panel PV detection summary PNG.
 
 Mirrors the AC Detection Results layout: pie chart of has_pv share, aggregated
-installed capacity bar with CI, aggregated self-consumption bar with IQR. Built
-in matplotlib (not plotly) because the target output is a single landscape PNG
-suitable for the thesis / portfolio summary slide.
+installed capacity bar with summed CI, aggregated self-consumption bar with
+capacity-weighted mean + capacity-weighted CI. Built in matplotlib (not plotly)
+because the target output is a single landscape PNG suitable for the
+thesis / portfolio summary slide.
 """
 
 from __future__ import annotations
@@ -44,8 +45,9 @@ def plot_pv_detection_summary(
          `has_pv == True` customers, with summed CI bounds as error bars.
          Annotated with the same n_PV count + mean/median per-customer kWp.
       3. Aggregated self-consumption restricted to `has_pv == True`
-         customers (NaN sc_share dropped): median sc_share with IQR as the
-         error bar, annotated with n_PV and the mean.
+         customers: capacity-weighted mean of `sc_share` with capacity-
+         weighted lower/upper CI bounds (matches the legacy aggregator
+         in `_pv_portfolio_v1._capacity_weighted_sc_aggregate`).
 
     All stat panels share one denominator — the number of PV-positive
     customers — so the counts are directly comparable.
@@ -191,34 +193,53 @@ def _draw_aggregate_capacity_bar(ax, pv_only: pd.DataFrame, n_pv: int) -> None:
 def _draw_aggregate_sc_bar(ax, pv_only: pd.DataFrame, n_pv: int) -> None:
     """Aggregate self-consumption over the PV-positive subset (n_pv customers).
 
-    Restricted to has_pv == True so the denominator matches the capacity panel.
-    NaN sc_share values within that subset are excluded from the median/IQR
-    computation but reported via the "missing" annotation.
+    Uses the legacy `_capacity_weighted_sc_aggregate` formulation:
+
+        agg_sc       = sum(kWp_i * sc_share_i) / sum(kWp_i)
+        agg_sc_lower = sum(kWp_i * sc_ci_lower_i) / sum(kWp_i)
+        agg_sc_upper = sum(kWp_i * sc_ci_upper_i) / sum(kWp_i)
+
+    Capacity weighting is the right physical aggregation: a 50 kWp system
+    contributes 5x more to "what fraction of kWh produced is consumed locally"
+    than a 10 kWp system. NaN bounds fall back to the point estimate so the
+    error bar collapses for customers without a CI rather than dragging the
+    aggregate to extremes.
     """
-    if "sc_share" not in pv_only.columns:
-        ax.text(0.5, 0.5, "sc_share not in results",
+    needed = ("sc_share", "pv_capacity_kwp")
+    missing_cols = [c for c in needed if c not in pv_only.columns]
+    if missing_cols:
+        ax.text(0.5, 0.5, f"missing columns: {missing_cols}",
                 ha="center", va="center", transform=ax.transAxes, fontsize=11)
         ax.set_title("Aggregated self-consumption")
         return
 
     sc = pd.to_numeric(pv_only["sc_share"], errors="coerce")
-    sc = sc[(sc.notna()) & (sc >= 0) & (sc <= 1)]
+    kwp = pd.to_numeric(pv_only["pv_capacity_kwp"], errors="coerce")
+    valid = sc.notna() & (sc >= 0) & (sc <= 1) & kwp.notna() & (kwp > 0)
+    sc = sc.loc[valid]
+    kwp = kwp.loc[valid]
     if sc.empty:
-        ax.text(0.5, 0.5, "No self-consumption values among PV customers",
+        ax.text(0.5, 0.5, "No usable sc_share + capacity rows",
                 ha="center", va="center", transform=ax.transAxes, fontsize=11)
         ax.set_title("Aggregated self-consumption")
         return
 
-    median_sc = float(sc.median())
-    p25 = float(sc.quantile(0.25))
-    p75 = float(sc.quantile(0.75))
-    mean_sc = float(sc.mean())
-    missing = n_pv - len(sc)
+    w_sum = float(kwp.sum())
+    agg_sc = float((kwp * sc).sum() / w_sum)
+
+    sc_lo = pd.to_numeric(pv_only.loc[valid, "sc_ci_lower"], errors="coerce").fillna(sc) if "sc_ci_lower" in pv_only.columns else sc
+    sc_hi = pd.to_numeric(pv_only.loc[valid, "sc_ci_upper"], errors="coerce").fillna(sc) if "sc_ci_upper" in pv_only.columns else sc
+    agg_lo = float(np.clip((kwp * sc_lo).sum() / w_sum, 0.0, 1.0))
+    agg_hi = float(np.clip((kwp * sc_hi).sum() / w_sum, 0.0, 1.0))
+    err_lo = max(0.0, agg_sc - agg_lo)
+    err_hi = max(0.0, agg_hi - agg_sc)
+
+    missing = n_pv - int(valid.sum())
 
     ax.bar(
         ["Self-consumption"],
-        [median_sc * 100],
-        yerr=[[(median_sc - p25) * 100], [(p75 - median_sc) * 100]],
+        [agg_sc * 100],
+        yerr=[[err_lo * 100], [err_hi * 100]],
         color=_BAR_SC,
         edgecolor=_BAR_EDGE,
         linewidth=1.0,
@@ -228,16 +249,19 @@ def _draw_aggregate_sc_bar(ax, pv_only: pd.DataFrame, n_pv: int) -> None:
         error_kw={"linewidth": 1.5},
     )
     ax.set_ylabel("Self-consumption share (%)", fontsize=11)
-    ax.set_ylim(0, 100)
+    # Headroom above the error bar so the annotation does not overlap.
+    top_pct = max(40.0, (agg_sc + err_hi) * 100 * 1.4)
+    ax.set_ylim(0, min(100.0, top_pct))
     ax.set_title(
         f"Aggregated self-consumption\n"
-        f"median {median_sc * 100:.1f}%  (IQR {p25 * 100:.1f}–{p75 * 100:.1f}%)",
+        f"{agg_sc * 100:.1f}%  (CI {agg_lo * 100:.1f}–{agg_hi * 100:.1f}%)",
         fontsize=12,
     )
     extra = f"  ({missing:,} missing sc_share)" if missing > 0 else ""
     ax.text(
         0.5, 0.96,
-        f"PV customers: {n_pv:,}{extra}\nmean: {mean_sc * 100:.1f}%",
+        f"PV customers: {n_pv:,}{extra}\n"
+        f"capacity-weighted across {int(valid.sum()):,} customers",
         transform=ax.transAxes, ha="center", va="top",
         fontsize=10, color="#444",
     )
