@@ -90,7 +90,10 @@ class BatteryDetector(AbstractDetector):
             }
 
         df = customer_df.copy()
-        df["DT_UTC"] = pd.to_datetime(df["DT_UTC"], errors="coerce")
+        _dt = pd.to_datetime(df["DT_UTC"], errors="coerce")
+        if _dt.dt.tz is not None:
+            _dt = _dt.dt.tz_convert("UTC").dt.tz_localize(None)
+        df["DT_UTC"] = _dt
         df = df.dropna(subset=["DT_UTC"]).set_index("DT_UTC").sort_index()
 
         # Build a pv_row dict compatible with the legacy function signature.

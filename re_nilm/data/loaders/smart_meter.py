@@ -47,7 +47,10 @@ def _load_single_file(
         if df.empty:
             return pd.DataFrame()
 
-    df["DT_UTC"] = pd.to_datetime(df["DT_UTC"], errors="coerce")
+    _dt = pd.to_datetime(df["DT_UTC"], errors="coerce")
+    if _dt.dt.tz is not None:
+        _dt = _dt.dt.tz_convert("UTC").dt.tz_localize(None)
+    df["DT_UTC"] = _dt
 
     # Drop customers whose annual consumption exceeds the threshold
     if max_annual_kwh > 0:

@@ -154,10 +154,10 @@ def analyze_battery_residential_v7(
         "pv_capacity_kwp": np.nan,
     }
     try:
-        if df_customer.index.tz is None:
-            df_customer.index = df_customer.index.tz_localize(INPUT_TIMEZONE)
+        # Ensure customer index is tz-naive UTC so merge_asof aligns with weather (also tz-naive UTC)
+        if df_customer.index.tz is not None:
+            df_customer.index = df_customer.index.tz_convert("UTC").tz_localize(None)
 
-        df_customer.index = df_customer.index.tz_convert(LOCAL_TIMEZONE).tz_localize(None)
         weather_df = _prepare_weather_for_merge(weather_df)
         merged = pd.merge_asof(
             df_customer.sort_index(),
