@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from re_nilm.detectors.base import AbstractDetector
 from re_nilm.detectors._battery_v7 import analyze_battery_residential_v7 as _analyze_battery
@@ -27,16 +30,16 @@ class BatteryDetector(AbstractDetector):
         dark_day_rad_max_w: Max peak W/m² for a day to count as 'dark'.
         sunny_day_rad_min_w: Min peak W/m² for a day to count as 'sunny'.
         temp_buffer_c: Temperature matching tolerance when pairing dark/sunny days.
-        sigmoid_intercept: Sigmoid bias term (more negative = stricter). Tuned to -3.0.
+        sigmoid_intercept: Sigmoid bias term (more negative = stricter). Tuned to -2.5.
         strict_min_matched_sunny_days: If fewer matched sunny days are found, apply a
             z-score penalty of `low_matched_days_z_penalty`. Tuned to 5.
         low_matched_days_z_penalty: Penalty subtracted from z when matched days are
-            below `strict_min_matched_sunny_days`. Tuned to 0.8.
+            below `strict_min_matched_sunny_days`. Tuned to 0.5.
         nominal_capacity_discharge_fraction: Assumed fraction of battery discharged per
-            evening event, used to scale shift energy → capacity estimate. Tuned to 0.65.
-        pv_anchor_kwh_per_kwp: kWh/kWp used for the PV-size capacity anchor. Tuned to 1.4.
+            evening event, used to scale shift energy → capacity estimate. Tuned to 0.35.
+        pv_anchor_kwh_per_kwp: kWh/kWp used for the PV-size capacity anchor (1:1 ratio). Tuned to 1.0.
         pv_anchor_blend_weight: Blend weight for the PV anchor in capacity estimation.
-            Tuned to 0.30.
+            Tuned to 0.45.
     """
 
     def __init__(
@@ -46,12 +49,12 @@ class BatteryDetector(AbstractDetector):
         dark_day_rad_max_w: float = 100.0,
         sunny_day_rad_min_w: float = 100.0,
         temp_buffer_c: float = 2.0,
-        sigmoid_intercept: float = -3.0,
+        sigmoid_intercept: float = -2.5,
         strict_min_matched_sunny_days: int = 5,
-        low_matched_days_z_penalty: float = 0.8,
-        nominal_capacity_discharge_fraction: float = 0.65,
-        pv_anchor_kwh_per_kwp: float = 1.4,
-        pv_anchor_blend_weight: float = 0.30,
+        low_matched_days_z_penalty: float = 0.5,
+        nominal_capacity_discharge_fraction: float = 0.35,
+        pv_anchor_kwh_per_kwp: float = 1.0,
+        pv_anchor_blend_weight: float = 0.45,
     ):
         self.classification_threshold = classification_threshold
         self.enforce_pv_required = enforce_pv_required
@@ -117,6 +120,7 @@ class BatteryDetector(AbstractDetector):
                 pv_anchor_blend_weight=self.pv_anchor_blend_weight,
             )
         except Exception as exc:
+            logger.warning("battery detection failed for customer %s: %s", customer_id, exc)
             return {
                 "customer_id": customer_id,
                 "has_battery": False,
