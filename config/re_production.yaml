@@ -6,9 +6,9 @@ data:
   metadata_dir: "data/re_data/ETHZ_ALL"
 
 pipeline:
-  n_workers: "auto"
+  n_workers: 4 #can be set to "auto" to use all available cores
   batch_size: 500
-  autosave_every_n_customers: 300
+  autosave_every_n_customers: 1000
 
 detectors:
   enabled:
@@ -20,4 +20,4 @@ detectors:
 
 models:
   pv:
-    capacity_bootstrap_n: 10
+    capacity_bootstrap_n: 20
