@@ -1,4 +1,4 @@
-"""AC disaggregation estimator — wraps AcTwoStageModel from model/ac_disaggregation.py."""
+"""AC disaggregation estimator — wraps AcTwoStageModel from re_nilm.estimators._ac_disagg_v1."""
 
 from __future__ import annotations
 
@@ -21,25 +21,12 @@ from re_nilm.estimators._ac_disagg_v1 import (
 def _joblib_load_compat(path: Path):
     """Load a joblib file, bridging numpy 2.x + sklearn 1.8 → 1.x pickle formats.
 
-    The AC disaggregator was saved in an environment with numpy 2.x and sklearn 1.8.
-    Loading it under numpy 1.x / sklearn 1.3.x requires four compatibility shims:
-
-    1. ``__bit_generator_ctor`` receives the *class* (e.g. PCG64) instead of the
-       plain string ``'PCG64'`` — numpy 1.x raises ``ValueError``.
-
-    2. ``__generator_ctor`` receives an already-constructed BitGenerator *instance*
-       (numpy 2.x passes it directly) instead of a name string.
-
-    3. ``BitGenerator.__setstate__`` may receive state in a format the Cython
-       ``PCG64.state`` setter rejects — silently discarded (random state is
-       irrelevant for inference).
-
-    4. The pickle references two modules not resolvable in the current environment:
-       - ``_loss`` → ``sklearn._loss._loss`` (compiled Cython extension; stored
-         without the sklearn prefix in editable sklearn installs)
-       - ``ac_disaggregation`` → legacy ``old_files/model/ac_disaggregation.py``
-         (must be on sys.path to unpickle AcTwoStageModel)
-
+    Pickles trained under numpy 2.x / sklearn 1.8 may require three numpy shims
+    when loaded under numpy 1.x / sklearn 1.3.x: ``__bit_generator_ctor`` and
+    ``__generator_ctor`` signature drift, and ``PCG64.__setstate__`` accepting
+    incompatible state. The fourth shim (``_loss``) maps a bare module name to
+    the sklearn Cython extension. Legacy module aliases for ``ac_disaggregation``
+    and ``disaggregation_functions`` live in ``re_nilm.estimators.__init__``.
     All patches are restored unconditionally in a finally block.
     """
     import sys
@@ -57,9 +44,6 @@ def _joblib_load_compat(path: Path):
     _orig_bg_ctor = _np_pickle.__bit_generator_ctor
     _orig_gen_ctor = _np_pickle.__generator_ctor
     _OrigPCG64 = _pcg64_mod.PCG64
-
-    # Locate the legacy model directory relative to this file's package root.
-    _legacy_model_dir = str(Path(__file__).parents[2] / "old_files" / "model")
 
     class _CompatPCG64(_OrigPCG64):
         """PCG64 subclass that silently ignores incompatible numpy 2.x state."""
@@ -84,15 +68,10 @@ def _joblib_load_compat(path: Path):
     _pcg64_mod.PCG64 = _CompatPCG64  # type: ignore[assignment]
     _np_random.PCG64 = _CompatPCG64  # type: ignore[assignment]
 
-    # Shim 4a: map bare '_loss' to the sklearn._loss Cython extension.
+    # Map bare '_loss' to the sklearn._loss Cython extension.
     import sklearn._loss._loss as _sk_loss_ext
     _added_loss = "_loss" not in sys.modules
     sys.modules.setdefault("_loss", _sk_loss_ext)
-
-    # Shim 4b: make the legacy ac_disaggregation module importable.
-    _added_legacy_path = _legacy_model_dir not in sys.path
-    if _added_legacy_path:
-        sys.path.insert(0, _legacy_model_dir)
 
     try:
         return joblib.load(path)
@@ -103,8 +82,6 @@ def _joblib_load_compat(path: Path):
         _np_pickle.__generator_ctor = _orig_gen_ctor
         if _added_loss:
             sys.modules.pop("_loss", None)
-        if _added_legacy_path and _legacy_model_dir in sys.path:
-            sys.path.remove(_legacy_model_dir)
 
 
 class ACDisaggregationEstimator(AbstractEstimator):
