@@ -7,6 +7,7 @@ from datetime import time
 import numpy as np
 import pandas as pd
 
+LOCAL_TIMEZONE = "Europe/Zurich"
 WEATHER_MERGE_DIRECTION = "backward"
 DARK_DAY_RAD_MAX_W = 100.0
 SUNNY_DAY_RAD_MIN_W = 100.0
@@ -136,17 +137,37 @@ def analyze_battery_residential_v7(
         "pv_capacity_kwp": np.nan,
     }
     try:
-        # Ensure both indexes are tz-naive UTC with matching unit for merge_asof
-        if df_customer.index.tz is not None:
-            df_customer.index = df_customer.index.tz_convert("UTC").tz_localize(None)
-        df_customer.index = df_customer.index.astype("datetime64[us]")
-        weather_df.index = weather_df.index.astype("datetime64[us]")
+        # Library convention: storage and merging are tz-naive UTC with matching
+        # datetime64[us] unit for merge_asof. Defensive normalisation for inputs
+        # that arrive tz-aware.
+        idx = df_customer.index
+        if idx.tz is not None:
+            idx = idx.tz_convert("UTC").tz_localize(None)
+        df_customer.index = idx.astype("datetime64[us]")
+
+        widx = pd.to_datetime(weather_df.index, errors="coerce")
+        if widx.tz is not None:
+            widx = widx.tz_convert("UTC").tz_localize(None)
+        weather_df = weather_df.copy()
+        weather_df.index = widx.astype("datetime64[us]")
+        weather_df = weather_df[~weather_df.index.isna()].sort_index()
         merged = pd.merge_asof(
             df_customer.sort_index(),
             weather_df,
             left_index=True,
             right_index=True,
             direction=WEATHER_MERGE_DIRECTION,
+        )
+
+        # Clock-time semantics ("evening", sunset, daily totals) are Swiss-local.
+        # Switch merged to a tz-naive Europe/Zurich index so between_time(),
+        # groupby(index.time), index.normalize() and resample("D") all use local
+        # civil time. Keeping the dtype tz-naive preserves downstream behaviour.
+        merged.index = (
+            merged.index.tz_localize("UTC")
+            .tz_convert(LOCAL_TIMEZONE)
+            .tz_localize(None)
+            .astype("datetime64[us]")
         )
 
         merged["rad_kwh_per_m2"] = merged["global_rad_W"] * RAD_W_TO_KWH_PER_15MIN
