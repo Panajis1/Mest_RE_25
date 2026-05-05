@@ -175,10 +175,8 @@ def _draw_aggregate_capacity_bar(ax, pv_only: pd.DataFrame, n_pv: int) -> None:
         f"{total_kwp / 1000.0:.1f} MWp  (CI {lower_kwp / 1000.0:.1f}–{upper_kwp / 1000.0:.1f} MWp)",
         fontsize=12,
     )
-    extra = f"  ({missing:,} missing capacity)" if missing > 0 else ""
     ax.text(
         0.5, 0.96,
-        f"PV customers: {n_pv:,}{extra}\n"
         f"mean / median: {mean_kwp:.1f} / {median_kwp:.1f} kWp",
         transform=ax.transAxes, ha="center", va="top",
         fontsize=10, color="#444",
@@ -234,8 +232,6 @@ def _draw_aggregate_sc_bar(ax, pv_only: pd.DataFrame, n_pv: int) -> None:
     err_lo = max(0.0, agg_sc - agg_lo)
     err_hi = max(0.0, agg_hi - agg_sc)
 
-    missing = n_pv - int(valid.sum())
-
     ax.bar(
         ["Self-consumption"],
         [agg_sc * 100],
@@ -257,11 +253,9 @@ def _draw_aggregate_sc_bar(ax, pv_only: pd.DataFrame, n_pv: int) -> None:
         f"{agg_sc * 100:.1f}%  (CI {agg_lo * 100:.1f}–{agg_hi * 100:.1f}%)",
         fontsize=12,
     )
-    extra = f"  ({missing:,} missing sc_share)" if missing > 0 else ""
     ax.text(
         0.5, 0.96,
-        f"PV customers: {n_pv:,}{extra}\n"
-        f"capacity-weighted across {int(valid.sum()):,} customers",
+        "Capacity-weighted aggregate",
         transform=ax.transAxes, ha="center", va="top",
         fontsize=10, color="#444",
     )
@@ -290,6 +284,7 @@ def plot_pv_capacity_vs_sc_share(
     results: pd.DataFrame,
     title: str = "System Size vs. Self-Consumption Share",
     sc_floor: float = 1e-6,
+    x_max_kwp: float = 80.0,
 ):
     """Scatter of estimated PV capacity vs self-consumption share.
 
@@ -314,15 +309,20 @@ def plot_pv_capacity_vs_sc_share(
     if "pv_capacity_kwp" not in results.columns or "sc_share" not in results.columns:
         raise ValueError("results must include 'pv_capacity_kwp' and 'sc_share'")
 
-    pv = results.loc[_bool_series(results["has_pv"])]
-    cap = pd.to_numeric(pv["pv_capacity_kwp"], errors="coerce")
-    sc = pd.to_numeric(pv["sc_share"], errors="coerce")
-    valid = cap.notna() & (cap > 0) & sc.notna() & (sc >= 0)
-    cap = cap.loc[valid]
-    sc = sc.loc[valid].clip(lower=sc_floor, upper=1.0)
+    pv = results.loc[_bool_series(results["has_pv"])].copy()
+    n_pv_detected = len(pv)
+    cap_raw = pd.to_numeric(pv["pv_capacity_kwp"], errors="coerce")
+    sc_raw = pd.to_numeric(pv["sc_share"], errors="coerce")
+
+    # Plot all has_pv=True rows. Missing/invalid values are imputed to 0 so the
+    # chart count exactly matches PV detection count.
+    cap_missing = int((~cap_raw.notna() | (cap_raw < 0)).sum())
+    sc_missing = int((~sc_raw.notna() | (sc_raw < 0)).sum())
+    cap = cap_raw.fillna(0.0).clip(lower=0.0)
+    sc = sc_raw.fillna(0.0).clip(lower=0.0, upper=1.0)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    if cap.empty:
+    if n_pv_detected == 0:
         ax.text(0.5, 0.5, "No PV customers with capacity + sc_share",
                 ha="center", va="center", transform=ax.transAxes, fontsize=11)
         ax.set_title(title, fontsize=13, fontweight="bold")
@@ -334,25 +334,27 @@ def plot_pv_capacity_vs_sc_share(
         color=_BAR_CAPACITY,
         edgecolors="none",
     )
-    ax.set_yscale("log")
-    ax.set_ylim(sc_floor, 1.5)
-    ax.set_xlim(0, float(cap.max()) * 1.03)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlim(0, float(x_max_kwp))
     ax.set_xlabel("Estimated PV capacity (kWp)", fontsize=11)
-    ax.set_ylabel(f"Self-consumption share (log scale, ≥{sc_floor:g})", fontsize=11)
+    ax.set_ylabel("Self-consumption share", fontsize=11)
     ax.set_title(title, fontsize=13, fontweight="bold")
     ax.grid(True, which="both", axis="both", alpha=0.2, linewidth=0.6)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    n_pts = len(cap)
-    n_floored = int((sc <= sc_floor * 1.01).sum())
-    extra = f"  ({n_floored:,} clipped to floor)" if n_floored else ""
-    ax.text(
-        0.99, 0.02,
-        f"n PV customers: {n_pts:,}{extra}",
-        transform=ax.transAxes, ha="right", va="bottom",
-        fontsize=10, color="#444",
-    )
+    notes = []
+    if cap_missing:
+        notes.append("cap→0 used")
+    if sc_missing:
+        notes.append("sc→0 used")
+    if notes:
+        ax.text(
+            0.99, 0.02,
+            ", ".join(notes),
+            transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=10, color="#444",
+        )
     fig.tight_layout()
     return fig
 

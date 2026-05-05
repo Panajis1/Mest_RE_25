@@ -80,7 +80,7 @@ def test_plot_pv_capacity_vs_sc_share_renders():
     fig = plot_pv_capacity_vs_sc_share(_synthetic_results())
     try:
         ax = fig.axes[0]
-        assert ax.get_yscale() == "log"
+        assert ax.get_yscale() == "linear"
         assert "Self-consumption" in ax.get_ylabel()
         assert "PV capacity" in ax.get_xlabel()
     finally:
@@ -88,18 +88,17 @@ def test_plot_pv_capacity_vs_sc_share_renders():
         plt.close(fig)
 
 
-def test_plot_pv_capacity_vs_sc_share_clips_zero_to_floor():
-    """sc_share == 0 must be visible at the floor, not silently dropped."""
+def test_plot_pv_capacity_vs_sc_share_keeps_zero_rows():
+    """sc_share == 0 must still be plotted (at y=0), not silently dropped."""
     df = _synthetic_results()
     df.loc[df["has_pv"], "sc_share"] = 0.0  # everyone has zero self-consumption
-    fig = plot_pv_capacity_vs_sc_share(df, sc_floor=1e-6)
+    fig = plot_pv_capacity_vs_sc_share(df)
     try:
-        # The scatter should have points (n PV customers), all at the floor.
         scatter = fig.axes[0].collections[0]
         offsets = scatter.get_offsets()
         assert len(offsets) == int(df["has_pv"].sum())
         ys = offsets[:, 1]
-        assert (ys <= 1e-6 * 1.01).all()
+        assert (ys == 0.0).all()
     finally:
         import matplotlib.pyplot as plt
         plt.close(fig)
