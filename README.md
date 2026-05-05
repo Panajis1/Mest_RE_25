@@ -37,9 +37,9 @@ scripts/
   train_models.py         # detector training CLI
   export_figures.py       # portfolio PNG export CLI
 
-models/                   # serialized model artifacts
+models/                   # serialized model artifacts (+ local cache/output subdirs)
 data/                     # raw, processed, and output data
-docs/figures/results/     # exported PNG figures
+figures/results/          # exported PNG figures
 tests/                    # unit and integration tests
 ```
 
@@ -88,7 +88,7 @@ python scripts/export_figures.py --config config/re_production.yaml
 
 The joined scalar output is written to
 `data/processed/out/results_all_customers.parquet`. Portfolio PNGs are written
-to `docs/figures/results`.
+to `figures/results`.
 
 ## Dependency Management
 
@@ -173,7 +173,7 @@ models:
 
 output:
   results_dir: "data/processed/out"
-  figures_dir: "docs/figures/results"
+  figures_dir: "figures/results"
 ```
 
 `config/re_production.yaml` currently overrides the data paths, enables all

@@ -61,11 +61,13 @@ data_loading.log
 notebooks/data_loading.log
 
 # Generated result artifacts (re-created by export scripts)
-docs/figures/
+figures/results/*
+!figures/results/.gitkeep
 scripts/prob_summary_from_autosave.csv
 
 # Generated HP outputs and AC cache (re-generated on each run)
 hp_model/hp_detection_outputs/
-model/ac_disagg_cache/
+models/ac_cache/
+models/ac_detection_outputs/
 
 CLAUDE.md

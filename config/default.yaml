@@ -70,4 +70,4 @@ forecast:
 
 output:
   results_dir: "data/processed/out"
-  figures_dir: "docs/figures/results"
+  figures_dir: "figures/results"
