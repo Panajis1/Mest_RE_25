@@ -32,12 +32,12 @@ class BatteryDetector(AbstractDetector):
         temp_buffer_c: Temperature matching tolerance when pairing dark/sunny days.
         sigmoid_intercept: Sigmoid bias term (more negative = stricter). Tuned to -2.5.
         strict_min_matched_sunny_days: If fewer matched sunny days are found, apply a
-            z-score penalty of `low_matched_days_z_penalty`. Tuned to 5.
+            z-score penalty of `low_matched_days_z_penalty`. Tuned to 7.
         low_matched_days_z_penalty: Penalty subtracted from z when matched days are
             below `strict_min_matched_sunny_days`. Tuned to 0.5.
         nominal_capacity_discharge_fraction: Assumed fraction of battery discharged per
-            evening event, used to scale shift energy → capacity estimate. Tuned to 0.35.
-        pv_anchor_kwh_per_kwp: kWh/kWp used for the PV-size capacity anchor (1:1 ratio). Tuned to 1.0.
+            evening event, used to scale shift energy → capacity estimate. Tuned to 0.25.
+        pv_anchor_kwh_per_kwp: kWh/kWp used for the PV-size capacity anchor. Tuned to 1.3.
         pv_anchor_blend_weight: Blend weight for the PV anchor in capacity estimation.
             Tuned to 0.45.
     """
@@ -50,10 +50,10 @@ class BatteryDetector(AbstractDetector):
         sunny_day_rad_min_w: float = 100.0,
         temp_buffer_c: float = 2.0,
         sigmoid_intercept: float = -2.5,
-        strict_min_matched_sunny_days: int = 5,
+        strict_min_matched_sunny_days: int = 7,
         low_matched_days_z_penalty: float = 0.5,
-        nominal_capacity_discharge_fraction: float = 0.35,
-        pv_anchor_kwh_per_kwp: float = 1.0,
+        nominal_capacity_discharge_fraction: float = 0.25,
+        pv_anchor_kwh_per_kwp: float = 1.3,
         pv_anchor_blend_weight: float = 0.45,
     ):
         self.classification_threshold = classification_threshold
@@ -96,9 +96,8 @@ class BatteryDetector(AbstractDetector):
         df["DT_UTC"] = _dt
         df = df.dropna(subset=["DT_UTC"]).set_index("DT_UTC").sort_index()
 
-        # Build a pv_row dict compatible with the legacy function signature.
-        # has_pv_prob is the key _battery_v7 uses for the inner PV gate (requires >= 0.5).
-        # PVDetector returns this value under the key "prob_pv".
+        # Build a pv_row dict compatible with _battery_v7's expected keys.
+        # prob_pv from PVDetector is forwarded as has_pv_prob for result reporting.
         pv_row = {
             "pv_capacity_kwp": pv_result.get("pv_capacity_kwp", 0.0),
             "has_pv": pv_result.get("has_pv", False),

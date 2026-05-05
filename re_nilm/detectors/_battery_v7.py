@@ -7,9 +7,6 @@ from datetime import time
 import numpy as np
 import pandas as pd
 
-# Tunable parameters copied from model/battery_detection.py
-INPUT_TIMEZONE = "UTC"
-LOCAL_TIMEZONE = "Europe/Zurich"
 WEATHER_MERGE_DIRECTION = "backward"
 DARK_DAY_RAD_MAX_W = 100.0
 SUNNY_DAY_RAD_MIN_W = 100.0
@@ -26,16 +23,16 @@ DEFAULT_PV_CAPACITY_KWP = 5.0
 BATTERY_CLASSIFICATION_THRESHOLD = 0.5
 ENFORCE_PV_FOR_BATTERY_DETECTION = True
 NON_PV_REJECTION_STATUS = "REJECTED: No PV Signal"
-SIGMOID_INTERCEPT = -2.0
+SIGMOID_INTERCEPT = -2.5
 SIGMOID_PEAK_SHIFT_WEIGHT = 0.04
 SIGMOID_GAP_RATIO_WEIGHT = 6.2
 INJECTION_RATIO_REFERENCE = 0.4
 INJECTION_BONUS_WEIGHT = 2.0
 SIGMOID_CONSISTENCY_WEIGHT = 1.1
 SIGMOID_SHIFT_RATIO_WEIGHT = 0.7
-STRICT_MIN_MATCHED_SUNNY_DAYS = 5
+STRICT_MIN_MATCHED_SUNNY_DAYS = 7
 LOW_MATCHED_DAYS_Z_PENALTY = 0.5
-CONSISTENCY_GAP_THRESHOLD_KWH = 0.5
+CONSISTENCY_GAP_THRESHOLD_KWH = 0.4
 INJECTION_RATIO_MIN_POTENTIAL_KWH = 0.1
 INJECTION_RATIO_CLIP_MIN = 0.0
 INJECTION_RATIO_CLIP_MAX = 2.0
@@ -45,7 +42,7 @@ SECURITY_MIN_GAP_KWH = 2.0
 SECURITY_MAX_GAP_KWH = 30.0
 SECURITY_OUTSIDE_SCALER = 0.4
 PHYSICAL_GAP_FACTOR = 2.5
-PHYSICAL_OUTSIDE_SCALER = 0.6
+PHYSICAL_OUTSIDE_SCALER = 0.7
 SHIFT_BLEND_GAP_WEIGHT = 0.60
 SHIFT_BLEND_SELFCONS_WEIGHT = 0.40
 CAPACITY_ESTIMATE_QUANTILE = 0.90
@@ -53,15 +50,12 @@ CAPACITY_LOW_QUANTILE = 0.25
 CAPACITY_HIGH_QUANTILE = 0.75
 CAPACITY_MIN_REALISTIC_KWH = 5.0
 CAPACITY_MAX_REALISTIC_KWH = 30.0
-NOMINAL_CAPACITY_DISCHARGE_FRACTION = 0.35
+NOMINAL_CAPACITY_DISCHARGE_FRACTION = 0.25
 MIN_SHIFT_FOR_NOMINAL_CAPACITY_KWH = 0.0
-PV_ANCHOR_KWH_PER_KWP = 1.0
+PV_ANCHOR_KWH_PER_KWP = 1.3
 PV_ANCHOR_BLEND_WEIGHT = 0.45
-CAPACITY_MAX_PER_KWP = 3.5
+CAPACITY_MAX_PER_KWP = 4.5
 SET_CAPACITY_NAN_WHEN_BELOW_REALISTIC_FLOOR = True
-POWER_ESTIMATE_QUANTILE = 0.90
-POWER_LOW_QUANTILE = 0.25
-POWER_HIGH_QUANTILE = 0.75
 PEAK_SHIFT_STEP_MINUTES = 15
 
 
@@ -91,15 +85,6 @@ def _detect_added_selfcons_columns(columns):
             selected.append(col)
     return sorted(set(selected))
 
-
-def _prepare_weather_for_merge(weather_df):
-    prepared = weather_df.copy()
-    idx = pd.to_datetime(prepared.index, errors="coerce")
-    if idx.tz is not None:
-        idx = idx.tz_convert("UTC").tz_localize(None)
-    prepared.index = idx.astype("datetime64[ns]")
-    prepared = prepared[~prepared.index.isna()].sort_index()
-    return prepared
 
 
 def _detect_dynamic_sunset_time(avg_rad_profile):
@@ -146,19 +131,16 @@ def analyze_battery_residential_v7(
         "capacity_estimation_method": "nominal_from_shift_plus_pv_anchor",
         "capacity_capped_by_pv_scaling": False,
         "max_physical_from_pv_kwh": np.nan,
-        "estimated_battery_power_kw": np.nan,
-        "power_ci_lower_kw": np.nan,
-        "power_ci_upper_kw": np.nan,
         "is_pv_customer": False,
         "has_pv_prob": np.nan,
         "pv_capacity_kwp": np.nan,
     }
     try:
-        # Ensure customer index is tz-naive UTC so merge_asof aligns with weather (also tz-naive UTC)
+        # Ensure both indexes are tz-naive UTC with matching unit for merge_asof
         if df_customer.index.tz is not None:
             df_customer.index = df_customer.index.tz_convert("UTC").tz_localize(None)
-
-        weather_df = _prepare_weather_for_merge(weather_df)
+        df_customer.index = df_customer.index.astype("datetime64[us]")
+        weather_df.index = weather_df.index.astype("datetime64[us]")
         merged = pd.merge_asof(
             df_customer.sort_index(),
             weather_df,
@@ -450,19 +432,6 @@ def analyze_battery_residential_v7(
                     np.clip(cap_high, CAPACITY_MIN_REALISTIC_KWH, CAPACITY_MAX_REALISTIC_KWH)
                 )
 
-        # Power from per-slot profile gap: gap_kwh_per_15min / 0.25h = kW.
-        # Use only active (non-zero) discharge slots so the CI is not pulled to zero
-        # by the majority of idle slots.
-        slot_power_kw = (prof_pair["dark_kwh"] - prof_pair["sun_kwh"]).clip(lower=0) / 0.25
-        active_slots = slot_power_kw[slot_power_kw > 0]
-        if active_slots.empty:
-            power_est = np.nan
-            power_low = np.nan
-            power_high = np.nan
-        else:
-            power_est = float(active_slots.quantile(POWER_ESTIMATE_QUANTILE))
-            power_low = float(active_slots.quantile(POWER_LOW_QUANTILE))
-            power_high = float(active_slots.quantile(POWER_HIGH_QUANTILE))
         battery_detected_by_score = final_prob >= BATTERY_CLASSIFICATION_THRESHOLD
         battery_detected = (
             battery_detected_by_score and is_pv_customer
@@ -495,15 +464,6 @@ def analyze_battery_residential_v7(
                 "capacity_capped_by_pv_scaling": bool(capacity_capped_by_pv_scaling),
                 "max_physical_from_pv_kwh": round(float(max_physical_from_pv_kwh), 3)
                 if pd.notna(max_physical_from_pv_kwh)
-                else np.nan,
-                "estimated_battery_power_kw": round(power_est, 3)
-                if pd.notna(power_est)
-                else np.nan,
-                "power_ci_lower_kw": round(power_low, 3)
-                if pd.notna(power_low)
-                else np.nan,
-                "power_ci_upper_kw": round(power_high, 3)
-                if pd.notna(power_high)
                 else np.nan,
                 "is_pv_customer": bool(is_pv_customer),
                 "has_pv_prob": round(float(pv_prob), 4) if pd.notna(pv_prob) else np.nan,

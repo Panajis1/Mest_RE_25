@@ -55,4 +55,3 @@ class CapacityResultRow(TypedDict):
     battery_capacity_kwh: float
     batt_ci_lower: float
     batt_ci_upper: float
-    battery_power_kw: float

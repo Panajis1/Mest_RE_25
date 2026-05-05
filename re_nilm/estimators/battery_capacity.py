@@ -66,7 +66,6 @@ class BatteryCapacityEstimator(AbstractEstimator):
         cap = float(result.get("estimated_battery_capacity_kwh", np.nan))
         cap_lo = float(result.get("capacity_ci_lower_kwh", np.nan))
         cap_hi = float(result.get("capacity_ci_upper_kwh", np.nan))
-        power_kw = float(result.get("estimated_battery_power_kw", np.nan))
 
         if not np.isnan(cap):
             if cap < self.capacity_min_kwh or cap > self.capacity_max_kwh:
@@ -77,5 +76,4 @@ class BatteryCapacityEstimator(AbstractEstimator):
             "battery_capacity_kwh": cap,
             "batt_ci_lower": cap_lo,
             "batt_ci_upper": cap_hi,
-            "battery_power_kw": power_kw,
         }

@@ -173,6 +173,11 @@ def load_customer_from_index(
             df["ID"] = df["ID"].astype(str)
             sub = df[df["ID"] == customer_id]
             if not sub.empty:
+                _dt = pd.to_datetime(sub["DT_UTC"], errors="coerce")
+                if _dt.dt.tz is not None:
+                    _dt = _dt.dt.tz_convert("UTC").dt.tz_localize(None)
+                sub = sub.copy()
+                sub["DT_UTC"] = _dt
                 frames.append(sub)
         except Exception as exc:
             print(f"[CustomerIndex] Error reading {path} for {customer_id}: {exc}")

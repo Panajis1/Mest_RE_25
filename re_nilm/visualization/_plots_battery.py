@@ -21,9 +21,6 @@ STATUS_CANDIDATES = ("battery_status",)
 CAPACITY_CANDIDATES = ("estimated_battery_capacity_kwh", "battery_capacity_kwh", "capacity_kwh")
 CAP_CI_LOWER_CANDIDATES = ("capacity_ci_lower_kwh",)
 CAP_CI_UPPER_CANDIDATES = ("capacity_ci_upper_kwh",)
-POWER_CANDIDATES = ("estimated_battery_power_kw", "battery_power_kw", "power_kw")
-POWER_CI_LOWER_CANDIDATES = ("power_ci_lower_kw",)
-POWER_CI_UPPER_CANDIDATES = ("power_ci_upper_kw",)
 PV_FLAG_CANDIDATES = ("has_pv",)
 PV_PROB_CANDIDATES = ("has_pv_prob",)
 PV_CAP_CANDIDATES = ("pv_capacity_kwp", "pv_capacity_ci_upper", "pv_capacity_kwp_floor")
@@ -313,105 +310,6 @@ def _plot_capacity_boxplot(df: pd.DataFrame, output_dir: Path):
     plt.close()
 
 
-def _plot_power_distribution(df: pd.DataFrame, output_dir: Path):
-    power_col = _pick_column(df.columns, POWER_CANDIDATES)
-    if power_col is None:
-        return
-
-    detected_power = pd.to_numeric(
-        df.loc[df["detected_battery"], power_col], errors="coerce"
-    ).dropna()
-    if detected_power.empty:
-        return
-
-    bins = max(10, min(40, int(np.sqrt(len(detected_power)) * 3)))
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(detected_power, bins=bins, color=COLOR_RED, edgecolor="white", alpha=0.85)
-    ax.axvline(detected_power.median(), color="white", linestyle="--", linewidth=1.5,
-               label=f"Median: {detected_power.median():.2f} kW")
-    ax.axvline(detected_power.mean(), color=COLOR_GREY, linestyle=":", linewidth=1.5,
-               label=f"Mean: {detected_power.mean():.2f} kW")
-    ax.set_title("Estimated battery power distribution — detected customers")
-    ax.set_xlabel("Estimated battery power (kW)")
-    ax.set_ylabel("Customers")
-    ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.25)
-    plt.tight_layout()
-    plt.savefig(output_dir / "battery_power_distribution.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-
-def _plot_power_boxplot(df: pd.DataFrame, output_dir: Path):
-    power_col = _pick_column(df.columns, POWER_CANDIDATES)
-    if power_col is None:
-        return
-
-    detected = df[df["detected_battery"]].copy()
-    detected["pwr"] = pd.to_numeric(detected[power_col], errors="coerce")
-    detected = detected.dropna(subset=["pwr"])
-    if detected.empty:
-        return
-
-    pv_pwr = detected.loc[detected["is_pv_customer_bool"], "pwr"].values
-    non_pv_pwr = detected.loc[~detected["is_pv_customer_bool"], "pwr"].values
-    all_pwr = detected["pwr"].values
-
-    groups, labels, colors = [], [], []
-    if len(pv_pwr):
-        groups.append(pv_pwr)
-        labels.append(f"PV customers\n(n={len(pv_pwr)})")
-        colors.append(COLOR_RED)
-    if len(non_pv_pwr):
-        groups.append(non_pv_pwr)
-        labels.append(f"Non-PV customers\n(n={len(non_pv_pwr)})")
-        colors.append(COLOR_GREY)
-    groups.append(all_pwr)
-    labels.append(f"All detected\n(n={len(all_pwr)})")
-    colors.append(COLOR_BLACK)
-
-    fig, ax = plt.subplots(figsize=(9, 6))
-    bp = ax.boxplot(groups, labels=labels, patch_artist=True, notch=False,
-                    medianprops={"color": "white", "linewidth": 2})
-    for patch, color in zip(bp["boxes"], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.85)
-    ax.set_title("Battery power distribution — detected customers")
-    ax.set_ylabel("Estimated battery power (kW)")
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(output_dir / "battery_power_boxplot.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-
-def _plot_capacity_vs_power_scatter(df: pd.DataFrame, output_dir: Path):
-    capacity_col = _pick_column(df.columns, CAPACITY_CANDIDATES)
-    power_col = _pick_column(df.columns, POWER_CANDIDATES)
-    if capacity_col is None or power_col is None:
-        return
-
-    detected = df[df["detected_battery"]].copy()
-    detected["cap"] = pd.to_numeric(detected[capacity_col], errors="coerce")
-    detected["pwr"] = pd.to_numeric(detected[power_col], errors="coerce")
-    detected = detected.dropna(subset=["cap", "pwr"])
-    if detected.empty:
-        return
-
-    pv_mask = detected["is_pv_customer_bool"]
-    fig, ax = plt.subplots(figsize=(9, 6))
-    ax.scatter(detected.loc[pv_mask, "cap"], detected.loc[pv_mask, "pwr"],
-               color=COLOR_RED, alpha=0.65, s=40, label=f"PV customers (n={pv_mask.sum()})")
-    ax.scatter(detected.loc[~pv_mask, "cap"], detected.loc[~pv_mask, "pwr"],
-               color=COLOR_GREY, alpha=0.65, s=40, label=f"Non-PV customers (n={(~pv_mask).sum()})")
-    ax.set_title("Battery capacity vs. estimated power — detected customers")
-    ax.set_xlabel("Estimated battery capacity (kWh)")
-    ax.set_ylabel("Estimated battery power (kW)")
-    ax.legend()
-    ax.grid(linestyle="--", alpha=0.25)
-    plt.tight_layout()
-    plt.savefig(output_dir / "battery_capacity_vs_power_scatter.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-
 def _plot_pv_vs_battery_capacity(df: pd.DataFrame, output_dir: Path):
     capacity_col = _pick_column(df.columns, CAPACITY_CANDIDATES)
     pv_cap_col = _pick_column(df.columns, PV_CAP_CANDIDATES)
@@ -433,6 +331,35 @@ def _plot_pv_vs_battery_capacity(df: pd.DataFrame, output_dir: Path):
     ax.grid(linestyle="--", alpha=0.25)
     plt.tight_layout()
     plt.savefig(output_dir / "pv_vs_battery_capacity_scatter.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_reliable_detected_share_pie(df: pd.DataFrame, output_dir: Path):
+    detected = df[df["detected_battery"]]
+    if detected.empty:
+        return
+
+    reliable = int(detected["is_reliable_detection"].sum())
+    needs_review = int(len(detected) - reliable)
+    reliable_pct = 100.0 * reliable / max(len(detected), 1)
+
+    plt.figure(figsize=(6.5, 6.5))
+    plt.pie(
+        [reliable, needs_review],
+        labels=[f"Reliable ({reliable_pct:.1f}%)", "Needs review"],
+        colors=[COLOR_BLACK, COLOR_RED],
+        autopct="%1.1f%%",
+        startangle=90,
+        wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+        textprops={"color": "white"},
+    )
+    plt.title(
+        f"Reliable detected share among detected battery customers\n"
+        f"(n_detected = {len(detected)})"
+    )
+    plt.legend(["Reliable", "Needs review"], loc="upper right")
+    plt.tight_layout()
+    plt.savefig(output_dir / "battery_reliable_detected_share_pie.png", dpi=300, bbox_inches="tight")
     plt.close()
 
 
@@ -500,12 +427,6 @@ def _save_portfolio_summary_tables(
         errors="coerce",
     ).dropna()
 
-    _pwr_col = _pick_column(df.columns, POWER_CANDIDATES)
-    power_series = pd.to_numeric(
-        df.loc[df["detected_battery"], _pwr_col] if _pwr_col else pd.Series(dtype=float),
-        errors="coerce",
-    ).dropna()
-
     summary_rows = [
         ("threshold_pct", float(threshold_pct)),
         ("reliability_margin_pct", float(reliability_margin_pct)),
@@ -560,22 +481,6 @@ def _save_portfolio_summary_tables(
         (
             "p75_detected_capacity_kwh",
             round(float(capacity_series.quantile(0.75)), 3) if not capacity_series.empty else np.nan,
-        ),
-        (
-            "avg_detected_power_kw",
-            round(float(power_series.mean()), 3) if not power_series.empty else np.nan,
-        ),
-        (
-            "median_detected_power_kw",
-            round(float(power_series.median()), 3) if not power_series.empty else np.nan,
-        ),
-        (
-            "p25_detected_power_kw",
-            round(float(power_series.quantile(0.25)), 3) if not power_series.empty else np.nan,
-        ),
-        (
-            "p75_detected_power_kw",
-            round(float(power_series.quantile(0.75)), 3) if not power_series.empty else np.nan,
         ),
     ]
     summary_df = pd.DataFrame(summary_rows, columns=["metric", "value"])
@@ -659,11 +564,9 @@ def main():
     _plot_status_breakdown(results_df, args.output_dir, status_col)
     _plot_capacity_distribution(results_df, args.output_dir)
     _plot_capacity_boxplot(results_df, args.output_dir)
-    _plot_power_distribution(results_df, args.output_dir)
-    _plot_power_boxplot(results_df, args.output_dir)
-    _plot_capacity_vs_power_scatter(results_df, args.output_dir)
     _plot_pv_vs_battery_capacity(results_df, args.output_dir)
     _plot_pv_split_among_detected(results_df, args.output_dir)
+    _plot_reliable_detected_share_pie(results_df, args.output_dir)
     _plot_reliability_assessment(
         results_df,
         args.output_dir,

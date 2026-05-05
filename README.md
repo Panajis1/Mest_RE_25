@@ -120,7 +120,7 @@ ignored by the customer index.
 | Column | Type | Meaning |
 |---|---|---|
 | `ID` | string | Customer identifier |
-| `DT_UTC` | datetime | 15-minute timestamp, UTC naive |
+| `DT_UTC` | datetime | 15-minute timestamp, UTC; both tz-aware and tz-naive parquet formats are accepted — `load_customer_from_index` and `SmartMeterLoader` normalise to tz-naive UTC before passing data to detectors |
 | `CONSO_KWH` | float | Grid import energy in the interval |
 | `PROD_KWH` | float | Grid export energy in the interval |
 
