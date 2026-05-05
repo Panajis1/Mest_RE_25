@@ -36,7 +36,6 @@ scripts/
   run_pipeline.py         # main pipeline CLI
   train_models.py         # detector training CLI
   export_figures.py       # portfolio PNG export CLI
-  validate_detectors.py   # comparison against legacy detector logic
 
 models/                   # serialized model artifacts
 data/                     # raw, processed, and output data
@@ -473,18 +472,6 @@ Run the synthetic integration test suite:
 ```bash
 python -m pytest tests/integration/ -v -m integration
 ```
-
-Validate detector outputs against legacy scripts when real data and weather are
-available:
-
-```bash
-python scripts/validate_detectors.py \
-  --data-dir data/re_data/ETHZ_ALL \
-  --weather data/processed/out/weather_meteoswiss_None_None.parquet
-```
-
-`validate_detectors.py` depends on legacy modules under `old_files/`; it is a
-data validation utility, not a lightweight CI smoke test.
 
 ## Demo Notebook
 

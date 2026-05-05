@@ -39,7 +39,7 @@ def _classifier_step(pipeline):
 
 
 def _prob_hp_winter_plus_summer(model, X: np.ndarray) -> float:
-    """Match hp_detection_functions / scripts/validate_detectors old HP branch."""
+    """Mirror the legacy hp_detection_functions HP-class branch."""
     proba = model.predict_proba(X)
     classes = _classifier_step(model).classes_
     hp_probs = {}
