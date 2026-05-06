@@ -156,7 +156,7 @@ def plot_battery_reliability_summary(
     axes[1].bar(
         ["Reliable detected", "Detected needs review"],
         [n_detected_reliable, n_detected_review],
-        color=[_BLACK, _RED],
+        color=[_RED, _BLACK],
         edgecolor=_BLACK,
         linewidth=0.9,
     )

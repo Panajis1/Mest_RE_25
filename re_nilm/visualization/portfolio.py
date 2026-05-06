@@ -33,6 +33,10 @@ _APPLIANCE_SPECS = [
 ]
 _APPLIANCE_PROB_COLS = {label.lower(): prob_col for label, _, prob_col in _APPLIANCE_SPECS}
 
+# Shared palette — matches the matplotlib battery summary plots.
+_RED = "#c9252b"
+_BLACK = "#111111"
+
 
 def _require_plotly() -> None:
     if not _PLOTLY_AVAILABLE:
@@ -202,12 +206,14 @@ def plot_pv_installed_capacity_summary(
     fig = go.Figure(go.Bar(
         x=["PV"],
         y=[total_kwp / 1000.0],
+        marker=dict(color=_RED, line=dict(color=_BLACK, width=1)),
         error_y=dict(
             type="data",
             symmetric=False,
             array=[max(0.0, upper_kwp - total_kwp) / 1000.0],
             arrayminus=[max(0.0, total_kwp - lower_kwp) / 1000.0],
             thickness=1.5,
+            color=_BLACK,
         ),
         customdata=[[
             n_detected,
@@ -270,6 +276,7 @@ def plot_pv_capacity_distribution(
     fig = go.Figure(go.Histogram(
         x=cap,
         xbins=dict(start=0, end=x_max_kwp, size=2),
+        marker=dict(color=_RED, line=dict(color=_BLACK, width=0.5)),
         hovertemplate="Capacity bin: %{x:.1f} kWp<br>Customers: %{y}<extra></extra>",
     ))
     fig.update_layout(

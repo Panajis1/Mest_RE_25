@@ -19,6 +19,10 @@ except Exception as _exc:  # pragma: no cover
 else:
     _PLOTLY_IMPORT_ERROR = None
 
+# Shared palette — matches the matplotlib battery summary plots.
+_RED = "#c9252b"
+_BLACK = "#111111"
+
 
 def _require_plotly():
     if px is None or go is None:
@@ -126,7 +130,16 @@ def plot_population_statistics(
     fig = make_subplots(rows=1, cols=len(cols), subplot_titles=cols)
     for i, c in enumerate(cols, start=1):
         vals = pd.to_numeric(df[c], errors="coerce").dropna()
-        fig.add_trace(go.Histogram(x=vals, name=c, nbinsx=40), row=1, col=i)
+        fig.add_trace(
+            go.Histogram(
+                x=vals,
+                name=c,
+                nbinsx=40,
+                marker=dict(color=_RED, line=dict(color=_BLACK, width=0.5)),
+            ),
+            row=1,
+            col=i,
+        )
     fig.update_layout(title=title, showlegend=False)
     return fig
 
@@ -151,7 +164,14 @@ def plot_capacity_vs_production_with_ci(
                 x=df["pv_capacity_kwp"],
                 y=df[y_col],
                 mode="markers",
-                error_x=dict(type="data", array=err_plus, arrayminus=err_minus, visible=err_plus is not None),
+                marker=dict(color=_RED, line=dict(color=_BLACK, width=0.3), opacity=0.55),
+                error_x=dict(
+                    type="data",
+                    array=err_plus,
+                    arrayminus=err_minus,
+                    visible=err_plus is not None,
+                    color=_BLACK,
+                ),
             )
         ]
     )

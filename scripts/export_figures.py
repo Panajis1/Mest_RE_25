@@ -282,21 +282,38 @@ def main():
         except Exception as exc:
             logger.warning("hp_customer_mix_pie failed: %s", exc)
 
-        # Prefer disaggregation-derived annual kWh; fall back to joined scalar column if present.
+        # Prefer the joined scalar column when present (cheap). Fall back to a
+        # streamed pyarrow aggregation over hp_disagg_15min.parquet — that file
+        # can be multi-GB on full portfolio runs, so a plain pd.read_parquet
+        # spikes RAM and risks OOM/laptop-crash. iter_batches keeps peak
+        # memory bounded to one batch (~200k rows ≈ tens of MB).
         hp_annual = None
-        hp_disagg_path = results_dir / "hp_disagg_15min.parquet"
-        if hp_disagg_path.exists():
-            try:
-                hp_disagg = pd.read_parquet(hp_disagg_path, columns=["customer_id", "hp_kw_pred"])
-                hp_annual = (
-                    pd.to_numeric(hp_disagg["hp_kw_pred"], errors="coerce")
-                    .groupby(hp_disagg["customer_id"].astype(str))
-                    .sum(min_count=1) * 0.25
-                )
-            except Exception as exc:
-                logger.warning("Failed loading hp_disagg_15min.parquet for annual HP PDF: %s", exc)
-        if hp_annual is None and "hp_annual_kwh" in results.columns:
+        if "hp_annual_kwh" in results.columns:
             hp_annual = pd.to_numeric(results["hp_annual_kwh"], errors="coerce")
+        else:
+            hp_disagg_path = results_dir / "hp_disagg_15min.parquet"
+            if hp_disagg_path.exists():
+                try:
+                    import pyarrow.parquet as pq
+                    sums: dict[str, float] = {}
+                    pf = pq.ParquetFile(hp_disagg_path)
+                    for batch in pf.iter_batches(
+                        batch_size=200_000,
+                        columns=["customer_id", "hp_kw_pred"],
+                    ):
+                        bdf = batch.to_pandas()
+                        s = (
+                            pd.to_numeric(bdf["hp_kw_pred"], errors="coerce")
+                            .groupby(bdf["customer_id"].astype(str))
+                            .sum(min_count=1)
+                        )
+                        for cid, val in s.items():
+                            if pd.notna(val):
+                                sums[cid] = sums.get(cid, 0.0) + float(val)
+                        del bdf, s
+                    hp_annual = pd.Series(sums, dtype=float) * 0.25
+                except Exception as exc:
+                    logger.warning("Failed streaming hp_disagg_15min.parquet for annual HP PDF: %s", exc)
 
         if hp_annual is not None:
             try:

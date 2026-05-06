@@ -16,11 +16,11 @@ import numpy as np
 import pandas as pd
 
 
-_PIE_HAS = "#e07b6a"      # warm red for the positive class — matches the AC reference
-_PIE_NO = "#5e9bd0"       # cool blue for the negative class
-_BAR_CAPACITY = "#5e9bd0"
-_BAR_SC = "#7da953"       # green for self-consumption
-_BAR_EDGE = "#333"
+_PIE_HAS = "#c9252b"      # battery palette red — positive class
+_PIE_NO = "#111111"       # battery palette black — negative class
+_BAR_CAPACITY = "#c9252b"
+_BAR_SC = "#c9252b"
+_BAR_EDGE = "#111111"
 
 
 def _bool_series(series: pd.Series) -> pd.Series:
@@ -103,7 +103,7 @@ def _draw_pv_ratio_pie(ax, results: pd.DataFrame, pv_mask: Optional[pd.Series] =
     # Tiny explode on the positive slice so it reads cleanly even when small.
     explode = (0.04, 0.0)
 
-    ax.pie(
+    _, label_texts, pct_texts = ax.pie(
         sizes,
         labels=labels,
         colors=colors,
@@ -111,8 +111,12 @@ def _draw_pv_ratio_pie(ax, results: pd.DataFrame, pv_mask: Optional[pd.Series] =
         startangle=90,
         autopct="%1.1f%%",
         textprops={"fontsize": 13, "fontweight": "bold"},
-        wedgeprops={"edgecolor": "white", "linewidth": 1.5},
+        wedgeprops={"edgecolor": "white", "linewidth": 1.1},
     )
+    for t in pct_texts:
+        t.set_color("white")
+    for t in label_texts:
+        t.set_color("#111111")
     ax.set_title(f"Overall PV ratio\n(n={n_total:,} users)", fontsize=12)
 
 

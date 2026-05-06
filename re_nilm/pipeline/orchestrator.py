@@ -370,13 +370,16 @@ class PipelineOrchestrator:
     def _compact_timeseries_parts(self, output_path: Path) -> int:
         """Stream-compact part-NNNNNN.parquet files into a single output file.
 
-        Uses pyarrow's ParquetWriter so peak memory is bounded to one part file
-        at a time (~150 MB at default disagg_part_size=100), instead of holding
-        every part in pandas + the concat result simultaneously. The previous
-        implementation caused 30+ GB peaks on 23k-customer 15-min disagg runs.
+        Reads one part at a time and writes it through a single ParquetWriter,
+        so peak memory is bounded to a single part (≈150 MB at the default
+        ``disagg_part_size=100``) regardless of how many parts exist. Each
+        part becomes one row group in the output, preserving the compression
+        ratio of per-part snappy blocks.
 
-        Falls back to the legacy pandas concat path if pyarrow isn't available
-        or if part schemas diverge in a way ParquetWriter rejects.
+        Falls back to a pandas-based streamed copy if pyarrow isn't usable.
+        The fallback also writes one part at a time — never loading the full
+        set of parts into memory at once (the previous fallback did, which
+        could need 30+ GB on a 20k-customer disagg run).
         """
         parts_dir = self._timeseries_parts_dir(output_path)
         part_paths = sorted(parts_dir.glob("part-*.parquet"))
@@ -384,6 +387,7 @@ class PipelineOrchestrator:
             return 0
 
         tmp_path = output_path.with_suffix(".tmp.parquet")
+        tmp_path.unlink(missing_ok=True)
         n_rows = 0
         try:
             import pyarrow.parquet as pq
@@ -395,21 +399,40 @@ class PipelineOrchestrator:
                         writer = pq.ParquetWriter(tmp_path, table.schema)
                     writer.write_table(table)
                     n_rows += table.num_rows
-                    del table  # release before reading the next part
+                    del table
             finally:
                 if writer is not None:
                     writer.close()
         except Exception as exc:
-            # Fall back to the pandas path, which is correct but memory-hungry.
+            # Pandas fallback that still streams one part at a time.
             logger.warning(
                 "[Orchestrator] pyarrow streaming compaction failed (%s); "
-                "falling back to pandas concat path", exc,
+                "falling back to per-part pandas streaming", exc,
             )
             tmp_path.unlink(missing_ok=True)
-            frames = [pd.read_parquet(path) for path in part_paths]
-            out = pd.concat(frames, ignore_index=True)
-            out.to_parquet(tmp_path, index=False)
-            n_rows = len(out)
+            try:
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+                writer = None
+                try:
+                    for path in part_paths:
+                        df = pd.read_parquet(path)
+                        table = pa.Table.from_pandas(df, preserve_index=False)
+                        if writer is None:
+                            writer = pq.ParquetWriter(tmp_path, table.schema)
+                        writer.write_table(table)
+                        n_rows += len(df)
+                        del df, table
+                finally:
+                    if writer is not None:
+                        writer.close()
+            except Exception:
+                # Last-resort: small datasets only — concat in pandas.
+                tmp_path.unlink(missing_ok=True)
+                frames = [pd.read_parquet(path) for path in part_paths]
+                out = pd.concat(frames, ignore_index=True)
+                out.to_parquet(tmp_path, index=False)
+                n_rows = len(out)
 
         tmp_path.replace(output_path)
         if not bool(self._pipe_cfg.get("keep_part_files", False)):
