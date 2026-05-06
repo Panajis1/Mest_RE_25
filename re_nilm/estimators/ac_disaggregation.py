@@ -1,4 +1,4 @@
-"""AC disaggregation estimator — wraps AcTwoStageModel from model/ac_disaggregation.py."""
+"""AC disaggregation estimator — wraps AcTwoStageModel from re_nilm.estimators._ac_disagg_v1."""
 
 from __future__ import annotations
 
@@ -62,25 +62,12 @@ def _patch_estimator_compat(obj):
 def _joblib_load_compat(path: Path):
     """Load a joblib file, bridging numpy 2.x + sklearn 1.8 → 1.x pickle formats.
 
-    The AC disaggregator was saved in an environment with numpy 2.x and sklearn 1.8.
-    Loading it under numpy 1.x / sklearn 1.3.x requires four compatibility shims:
-
-    1. ``__bit_generator_ctor`` receives the *class* (e.g. PCG64) instead of the
-       plain string ``'PCG64'`` — numpy 1.x raises ``ValueError``.
-
-    2. ``__generator_ctor`` receives an already-constructed BitGenerator *instance*
-       (numpy 2.x passes it directly) instead of a name string.
-
-    3. ``BitGenerator.__setstate__`` may receive state in a format the Cython
-       ``PCG64.state`` setter rejects — silently discarded (random state is
-       irrelevant for inference).
-
-    4. The pickle references two modules not resolvable in the current environment:
-       - ``_loss`` → ``sklearn._loss._loss`` (compiled Cython extension; stored
-         without the sklearn prefix in editable sklearn installs)
-       - ``ac_disaggregation`` → legacy ``old_files/model/ac_disaggregation.py``
-         (must be on sys.path to unpickle AcTwoStageModel)
-
+    Pickles trained under numpy 2.x / sklearn 1.8 may require three numpy shims
+    when loaded under numpy 1.x / sklearn 1.3.x: ``__bit_generator_ctor`` and
+    ``__generator_ctor`` signature drift, and ``PCG64.__setstate__`` accepting
+    incompatible state. The fourth shim (``_loss``) maps a bare module name to
+    the sklearn Cython extension. Legacy module aliases for ``ac_disaggregation``
+    and ``disaggregation_functions`` live in ``re_nilm.estimators.__init__``.
     All patches are restored unconditionally in a finally block.
     """
     import sys
@@ -98,9 +85,6 @@ def _joblib_load_compat(path: Path):
     _orig_bg_ctor = _np_pickle.__bit_generator_ctor
     _orig_gen_ctor = _np_pickle.__generator_ctor
     _OrigPCG64 = _pcg64_mod.PCG64
-
-    # Locate the legacy model directory relative to this file's package root.
-    _legacy_model_dir = str(Path(__file__).parents[2] / "old_files" / "model")
 
     class _CompatPCG64(_OrigPCG64):
         """PCG64 subclass that silently ignores incompatible numpy 2.x state."""
@@ -125,35 +109,12 @@ def _joblib_load_compat(path: Path):
     _pcg64_mod.PCG64 = _CompatPCG64  # type: ignore[assignment]
     _np_random.PCG64 = _CompatPCG64  # type: ignore[assignment]
 
-    # Shim 4a: map bare '_loss' to the sklearn._loss Cython extension.
+    # Map bare '_loss' to the sklearn._loss Cython extension.
     import sklearn._loss._loss as _sk_loss_ext
     _added_loss = "_loss" not in sys.modules
     sys.modules.setdefault("_loss", _sk_loss_ext)
 
-    # Shim 4c: generate missing __pyx_unpickle_Cy* stubs for all Cy* classes
-    # (sklearn 1.3.x pickles reference these; removed in 1.8.x).
-    import inspect as _inspect
-    _added_cy_ctors: list = []
-    for _name, _cls in _inspect.getmembers(_sk_loss_ext, _inspect.isclass):
-        _ctor_name = f"__pyx_unpickle_{_name}"
-        if _name.startswith("Cy") and not hasattr(_sk_loss_ext, _ctor_name):
-            def _make_ctor(cls):
-                def _ctor(tp, checksum, state, _c=cls):
-                    obj = (_c if tp is None else tp).__new__(_c if tp is None else tp)
-                    if state is not None:
-                        try:
-                            obj.__setstate__(state)
-                        except Exception:
-                            pass
-                    return obj
-                return _ctor
-            setattr(_sk_loss_ext, _ctor_name, _make_ctor(_cls))
-            _added_cy_ctors.append(_ctor_name)
 
-    # Shim 4b: make the legacy ac_disaggregation module importable.
-    _added_legacy_path = _legacy_model_dir not in sys.path
-    if _added_legacy_path:
-        sys.path.insert(0, _legacy_model_dir)
 
     try:
         return joblib.load(path)
@@ -185,6 +146,21 @@ class ACDisaggregationEstimator(AbstractEstimator):
     def __init__(self, model, feature_cols: Optional[List[str]] = None):
         self.model = model
         self.feature_cols = feature_cols
+        # Cache the dt-normalised + sorted weather frame so it isn't rebuilt
+        # per customer. Keyed by id(weather_df); cache lifetime matches this
+        # estimator instance (one cache entry per unique weather DF identity).
+        self._weather_sorted_cache: dict = {}
+
+    def _get_sorted_weather(self, weather: pd.DataFrame) -> pd.DataFrame:
+        key = id(weather)
+        cached = self._weather_sorted_cache.get(key)
+        if cached is not None:
+            return cached
+        wdf = weather.copy()
+        wdf["dt_utc"] = wdf["dt_utc"].astype("datetime64[us]")
+        wdf = wdf.sort_values("dt_utc")
+        self._weather_sorted_cache[key] = wdf
+        return wdf
 
     @classmethod
     def load(cls, path: Path, features_path: Optional[Path] = None, **kwargs) -> "ACDisaggregationEstimator":
@@ -230,9 +206,7 @@ class ACDisaggregationEstimator(AbstractEstimator):
 
         # Normalize to datetime64[us] — pandas 2.x merge_asof requires identical units
         df["DT_UTC"] = df["DT_UTC"].astype("datetime64[us]")
-        wdf = weather.copy()
-        wdf["dt_utc"] = wdf["dt_utc"].astype("datetime64[us]")
-        wdf = wdf.sort_values("dt_utc")
+        wdf = self._get_sorted_weather(weather)
         merged = pd.merge_asof(
             df.rename(columns={"DT_UTC": "dt_utc"}),
             wdf,

@@ -56,7 +56,7 @@ def align_weather_to_meter(
         weather.rename(columns={weather_time_col: meter_time_col}),
         on=meter_time_col,
         direction="backward",
-        tolerance=pd.Timedelta("1h"),
+        tolerance=pd.Timedelta("15min"),
     )
     return merged
 

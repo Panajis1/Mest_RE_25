@@ -27,8 +27,8 @@ class DailyFeaturesRow(TypedDict):
     coeff_var: float
     acf_1h: float
     acf_24h: float
-    G_daily: float
-    G_midday: float
+    G_daily_raw_sum: float    # sum of W/m² readings — used only for relative bucket classification
+    G_midday_raw_sum: float   # sum of midday W/m² readings — used only for relative bucket classification
 
 
 class DetectionResultRow(TypedDict):

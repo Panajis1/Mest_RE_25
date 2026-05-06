@@ -116,13 +116,18 @@ class ACDetector(AbstractDetector):
         X = np.array([[feats.get(c, np.nan) for c in self.feature_cols]])
         try:
             prob = float(self.model.predict_proba(X)[0, 1])
-        except Exception:
-            prob = np.nan
+        except Exception as exc:
+            return {
+                "customer_id": customer_id,
+                "has_ac": False,
+                "prob_ac": 0.0,
+                "error": f"ac_predict_failed: {exc}",
+            }
 
-        has_ac = not np.isnan(prob) and prob >= self.prob_threshold
+        has_ac = prob >= self.prob_threshold
 
         return {
             "customer_id": customer_id,
             "has_ac": has_ac,
-            "prob_ac": prob if not np.isnan(prob) else 0.0,
+            "prob_ac": prob,
         }

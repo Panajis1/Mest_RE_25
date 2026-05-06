@@ -12,6 +12,43 @@ from re_nilm.detectors.base import AbstractDetector
 
 _STEP_H = 0.25  # 15-min timestep in hours
 
+# --- PV-surplus charging mask thresholds -----------------------------------
+# An EV charging on PV surplus shows up as: PV export drops sharply (the EV
+# is consuming what would otherwise be exported) AND the net building load
+# stays roughly flat AND the net load is meaningfully positive.
+_PV_EXCEDENT_DROP_KW = -0.5     # kW: PROD_KWH_kW.diff() < this → recent drop in export
+_PV_NET_LOAD_STD_KW = 0.25      # kW: rolling-1h std below this → flat charging
+_PV_NET_LOAD_MIN_KW = 0.8       # kW: net load above this → real consumption (not noise)
+_PV_NET_LOAD_ROLL_WINDOW = 4    # 4 × 15min = 1 hour rolling window for the std test
+
+# --- Night-time baseline window -------------------------------------------
+# Used to estimate the customer's quiet baseload before subtracting it from
+# active_load. Chosen 01:00–04:00 to avoid evening tail-load and morning ramp-up.
+_NIGHT_HOUR_START = 1
+_NIGHT_HOUR_END = 4
+
+# --- Logistic + linear scoring constants ----------------------------------
+# Each maps a session-level statistic to a [0, 1] sub-score; the overall
+# EV_probability is a weighted sum that sums to 1.0. Tuning these shifts the
+# detection threshold rather than the fundamental signal.
+_SCORE_W_N_SESSIONS = 0.30
+_SCORE_W_MAX_WEEKLY = 0.25
+_SCORE_W_MEAN_POWER = 0.20
+_SCORE_W_MEAN_ENERGY = 0.15
+_SCORE_W_FLATNESS = 0.10
+
+_N_SESSIONS_LOG_X0 = 8.0     # logistic midpoint: ~8 sessions/year
+_N_SESSIONS_LOG_K = 0.4
+_MAX_WEEKLY_LOG_X0 = 2.0     # logistic midpoint: ~2 sessions/week
+_MAX_WEEKLY_LOG_K = 1.2
+_MEAN_POWER_LO_KW = 0.8      # below this kW → score 0
+_MEAN_POWER_HI_KW = 2.5      # at/above this kW → score 1
+_MEAN_ENERGY_LO_KWH = 4.0    # below this kWh → score 0
+_MEAN_ENERGY_HI_KWH = 20.0   # at/above this kWh → score 1
+
+
+_SESSION_COLUMNS = ["start", "duration_h", "mean_power_kW", "energy_kWh"]
+
 
 def _extract_sessions(
     mask: pd.Series,
@@ -19,34 +56,56 @@ def _extract_sessions(
     min_len: int,
     max_rel_std: float,
 ) -> pd.DataFrame:
-    """Group consecutive True values in mask into charging sessions."""
-    groups: list[list[int]] = []
-    cur: list[int] = []
-    for i, ok in enumerate(mask):
-        if ok:
-            cur.append(i)
-        else:
-            if len(cur) >= min_len:
-                groups.append(cur)
-            cur = []
-    if len(cur) >= min_len:
-        groups.append(cur)
+    """Group consecutive True values in mask into charging sessions.
 
-    sessions = []
-    for g in groups:
-        load = load_col.iloc[g]
-        mean_p = load.mean()
-        if mean_p > 0 and load.std() / mean_p <= max_rel_std:
-            duration_h = len(g) * _STEP_H
-            sessions.append(
-                {
-                    "start": load_col.index[g[0]],
-                    "duration_h": duration_h,
-                    "mean_power_kW": mean_p,
-                    "energy_kWh": mean_p * duration_h,
-                }
-            )
-    return pd.DataFrame(sessions)
+    Vectorized using a run-id pattern: each contiguous run gets a unique id,
+    then groupby aggregates per run. Avoids a Python-level per-timestep loop
+    that dominated the previous implementation on 35k+ timestep series.
+    """
+    if not mask.any():
+        return pd.DataFrame(columns=_SESSION_COLUMNS)
+
+    # run_id increments at every transition (True↔False or False↔True).
+    run_id = (mask != mask.shift()).cumsum()
+
+    # Restrict to True runs only.
+    true_mask = mask.to_numpy()
+    if not true_mask.any():
+        return pd.DataFrame(columns=_SESSION_COLUMNS)
+
+    work = pd.DataFrame(
+        {
+            "load": load_col.values[true_mask],
+            "run": run_id.values[true_mask],
+            "ts": load_col.index[true_mask],
+        }
+    )
+    stats = work.groupby("run").agg(
+        size=("load", "size"),
+        mean=("load", "mean"),
+        std=("load", "std"),
+        start=("ts", "first"),
+    )
+
+    keep = (
+        (stats["size"] >= min_len)
+        & (stats["mean"] > 0)
+        & (stats["std"].fillna(0.0) / stats["mean"] <= max_rel_std)
+    )
+    stats = stats[keep]
+    if stats.empty:
+        return pd.DataFrame(columns=_SESSION_COLUMNS)
+
+    duration_h = stats["size"].to_numpy() * _STEP_H
+    mean_kw = stats["mean"].to_numpy()
+    return pd.DataFrame(
+        {
+            "start": stats["start"].to_numpy(),
+            "duration_h": duration_h,
+            "mean_power_kW": mean_kw,
+            "energy_kWh": mean_kw * duration_h,
+        }
+    )
 
 
 def _ev_probability(
@@ -85,7 +144,7 @@ def _ev_probability(
     df["Excedent"] = df["PROD_KWH"] / _STEP_H
 
     hour = df.index.hour
-    night_mask = (hour >= 1) & (hour < 4)
+    night_mask = (hour >= _NIGHT_HOUR_START) & (hour < _NIGHT_HOUR_END)
     df["net_load"] = df["Consommation"] - df["Excedent"]
     baseload = float(df.loc[night_mask, "net_load"].median()) if night_mask.any() else 0.0
 
@@ -96,9 +155,9 @@ def _ev_probability(
 
     # PV-surplus charging sessions: PROD drops + stable net_load
     pv_mask = (
-        (df["Excedent"].diff() < -0.5)
-        & (df["net_load"].rolling(4).std() < 0.25)
-        & (df["net_load"] > 0.8)
+        (df["Excedent"].diff() < _PV_EXCEDENT_DROP_KW)
+        & (df["net_load"].rolling(_PV_NET_LOAD_ROLL_WINDOW).std() < _PV_NET_LOAD_STD_KW)
+        & (df["net_load"] > _PV_NET_LOAD_MIN_KW)
     )
     pv_sess = _extract_sessions(pv_mask, df["net_load"], min_session_steps, max_rel_std)
 
@@ -123,11 +182,15 @@ def _ev_probability(
         flatness = float(sessions["energy_kWh"].std() / (mean_energy + 1e-6))
 
         ev_prob = _clip01(
-            0.30 * _logistic(n_sessions, 8, 0.4)
-            + 0.25 * _logistic(max_weekly, 2, 1.2)
-            + 0.20 * _clip01((mean_power - 0.8) / (2.5 - 0.8))
-            + 0.15 * _clip01((mean_energy - 4.0) / (20.0 - 4.0))
-            + 0.10 * _clip01(1.0 - flatness)
+            _SCORE_W_N_SESSIONS * _logistic(n_sessions, _N_SESSIONS_LOG_X0, _N_SESSIONS_LOG_K)
+            + _SCORE_W_MAX_WEEKLY * _logistic(max_weekly, _MAX_WEEKLY_LOG_X0, _MAX_WEEKLY_LOG_K)
+            + _SCORE_W_MEAN_POWER * _clip01(
+                (mean_power - _MEAN_POWER_LO_KW) / (_MEAN_POWER_HI_KW - _MEAN_POWER_LO_KW)
+            )
+            + _SCORE_W_MEAN_ENERGY * _clip01(
+                (mean_energy - _MEAN_ENERGY_LO_KWH) / (_MEAN_ENERGY_HI_KWH - _MEAN_ENERGY_LO_KWH)
+            )
+            + _SCORE_W_FLATNESS * _clip01(1.0 - flatness)
         )
 
     return {

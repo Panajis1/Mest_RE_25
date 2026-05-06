@@ -67,6 +67,20 @@ class BatteryDetector(AbstractDetector):
         self.nominal_capacity_discharge_fraction = nominal_capacity_discharge_fraction
         self.pv_anchor_kwh_per_kwp = pv_anchor_kwh_per_kwp
         self.pv_anchor_blend_weight = pv_anchor_blend_weight
+        # Cache the indexed weather frame so it's not rebuilt per customer.
+        # Keyed by id(weather_df); cache lifetime matches this detector instance.
+        self._weather_indexed_cache: dict = {}
+
+    def _get_indexed_weather(self, weather_df: pd.DataFrame) -> pd.DataFrame:
+        key = id(weather_df)
+        cached = self._weather_indexed_cache.get(key)
+        if cached is not None:
+            return cached
+        w = weather_df.copy()
+        w["dt_utc"] = pd.to_datetime(w["dt_utc"], errors="coerce")
+        w = w.dropna(subset=["dt_utc"]).set_index("dt_utc").sort_index()
+        self._weather_indexed_cache[key] = w
+        return w
 
     def predict_customer(
         self,
@@ -104,9 +118,7 @@ class BatteryDetector(AbstractDetector):
             "has_pv_prob": pv_result.get("prob_pv", np.nan),
         }
 
-        weather = weather_df.copy()
-        weather["dt_utc"] = pd.to_datetime(weather["dt_utc"], errors="coerce")
-        weather = weather.dropna(subset=["dt_utc"]).set_index("dt_utc").sort_index()
+        weather = self._get_indexed_weather(weather_df)
 
         try:
             result = _analyze_battery(
@@ -130,9 +142,8 @@ class BatteryDetector(AbstractDetector):
                 "battery_status": f"error: {exc}",
             }
 
-        # battery_prob from analyze_battery_residential_v7 is in percent (0–100); normalise to 0–1
-        prob_raw = float(result.get("battery_prob", 0.0))
-        prob = prob_raw / 100.0 if prob_raw > 1.0 else prob_raw
+        # battery_prob from analyze_battery_residential_v7 is always in percent (0–100).
+        prob = float(result.get("battery_prob", 0.0)) / 100.0
         has_battery = prob >= self.classification_threshold
 
         return {

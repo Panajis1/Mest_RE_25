@@ -1,25 +1,34 @@
-"""Train AC and HP detector models from the unified Dataport training dataset.
+"""Train AC/HP detector and disaggregator models from the unified Dataport dataset.
 
 Reads a pre-processed parquet that combines smart meter load features with
 Dataport ground-truth appliance labels and writes trained scikit-learn models
-to the ``models/`` directory. Existing artifacts are overwritten.
+to the ``models/`` directory. Each model is independently trainable — pass the
+component's name to ``--models``. Existing artifacts are overwritten.
+
+Trainable components:
+    ac_detector       → models/ac_detector_v1.joblib       (RandomForest binary classifier)
+    hp_detector       → models/hp_detector_v1.joblib       (RandomForest binary classifier)
+    ac_disaggregator  → models/ac_disaggregator_v1.pkl     (AcTwoStageModel + features sidecar)
+    hp_disaggregator  → models/hp_disaggregator_v1.joblib  (ScientificTwoStageHPModel + features sidecar)
 
 Prerequisites:
     - Training data at the path set by ``data.training_data_path`` in the config
       (default: ``data/processed/training/all_sources_load_with_weather.parquet``).
-      Required columns include ``customer_id``, ``label``, and all feature columns
-      expected by ACDetectorTrainer / HPDetectorTrainer (see their FEATURE_COLS).
+      Detector trainers expect either pre-computed feature tables or the raw
+      all_sources format. Disaggregator trainers always require the raw format
+      (columns: type, source, dt_utc, glob_rad, value_kw_mean, id_customer, temp).
     - scikit-learn 1.3.x — model artifacts are not forward-compatible across minor
       versions (pinned in requirements.txt).
 
-Output:
-    models/ac_detector_v1.joblib   — Random-forest AC detector (sklearn Pipeline)
-    models/hp_detector_v1.joblib   — Random-forest HP detector (sklearn Pipeline)
-
 Usage:
-    python scripts/train_models.py --config config/re_production.yaml
-    python scripts/train_models.py --models ac_detector
-    python scripts/train_models.py --training-data path/to/training.parquet
+    # Train everything
+    python scripts/train_models.py --models ac_detector,hp_detector,ac_disaggregator,hp_disaggregator
+
+    # Just the AC disaggregator (e.g. retrain after a feature change)
+    python scripts/train_models.py --models ac_disaggregator
+
+    # Override training data path (useful for one-off experiments)
+    python scripts/train_models.py --models hp_disaggregator --training-data path/to/data.parquet
 """
 
 from __future__ import annotations
@@ -36,6 +45,10 @@ if str(_REPO_ROOT) not in sys.path:
 from re_nilm.pipeline.orchestrator import load_config
 from re_nilm.training.trainers.ac_detector_trainer import ACDetectorTrainer, FEATURE_COLS as AC_FEATURES
 from re_nilm.training.trainers.hp_detector_trainer import HPDetectorTrainer, FEATURE_COLS as HP_FEATURES
+from re_nilm.training.trainers.ac_disagg_trainer import ACDisaggregatorTrainer
+from re_nilm.training.trainers.hp_disagg_trainer import HPDisaggregatorTrainer
+
+_VALID_MODELS = ("ac_detector", "hp_detector", "ac_disaggregator", "hp_disaggregator")
 
 
 def _parse_args():
@@ -44,7 +57,10 @@ def _parse_args():
     parser.add_argument(
         "--models",
         default="ac_detector,hp_detector",
-        help="Comma-separated list of models to train",
+        help=(
+            "Comma-separated list of models to train. "
+            f"Valid values: {', '.join(_VALID_MODELS)}"
+        ),
     )
     parser.add_argument(
         "--training-data",
@@ -104,6 +120,54 @@ def _train_hp_detector(training_data_path: Path, output_path: Path, cfg: dict) -
     logger.info("HP detector saved → %s", output_path)
 
 
+def _train_ac_disaggregator(training_data_path: Path, output_path: Path, cfg: dict) -> None:
+    """Fit, evaluate, and save the AC two-stage disaggregation model."""
+    logger = logging.getLogger("train_models.ac_disagg")
+    logger.info("Loading training data from %s", training_data_path)
+    df = _load_training_data(training_data_path)
+    logger.info("Loaded %d rows", len(df))
+
+    test_size = float(
+        cfg.get("training", {}).get("ac_disaggregator", {}).get("test_size", 0.2)
+    )
+    trainer = ACDisaggregatorTrainer(test_size=test_size)
+    trainer.fit(df)
+
+    metrics = trainer.evaluate()
+    logger.info(
+        "AC disaggregator evaluation: F1(ac_on)=%.3f | MAE(ac_kw)=%.3f kW | "
+        "%d/%d train/test users",
+        metrics["f1_ac_on"], metrics["mae_ac_kw"],
+        metrics["n_train_users"], metrics["n_test_users"],
+    )
+
+    trainer.save(output_path)
+
+
+def _train_hp_disaggregator(training_data_path: Path, output_path: Path, cfg: dict) -> None:
+    """Fit, evaluate, and save the HP two-stage disaggregation model."""
+    logger = logging.getLogger("train_models.hp_disagg")
+    logger.info("Loading training data from %s", training_data_path)
+    df = _load_training_data(training_data_path)
+    logger.info("Loaded %d rows", len(df))
+
+    test_size = float(
+        cfg.get("training", {}).get("hp_disaggregator", {}).get("test_size", 0.2)
+    )
+    trainer = HPDisaggregatorTrainer(test_size=test_size)
+    trainer.fit(df)
+
+    metrics = trainer.evaluate()
+    logger.info(
+        "HP disaggregator evaluation: F1(hp_on)=%.3f | MAE(hp_kw)=%.3f kW | "
+        "%d/%d train/test users",
+        metrics["f1_hp_on"], metrics["mae_hp_kw"],
+        metrics["n_train_users"], metrics["n_test_users"],
+    )
+
+    trainer.save(output_path)
+
+
 def main():
     args = _parse_args()
     logging.basicConfig(
@@ -113,7 +177,12 @@ def main():
     )
 
     cfg = load_config(args.config)
-    models_to_train = [m.strip() for m in args.models.split(",")]
+    models_to_train = [m.strip() for m in args.models.split(",") if m.strip()]
+    unknown = [m for m in models_to_train if m not in _VALID_MODELS]
+    if unknown:
+        raise SystemExit(
+            f"Unknown --models values: {unknown}. Valid: {', '.join(_VALID_MODELS)}"
+        )
 
     training_data_path = Path(
         args.training_data
@@ -121,6 +190,13 @@ def main():
     )
     models_dir = Path(cfg.get("output", {}).get("models_dir", "models"))
     models_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pick disaggregator output paths from config if set, so a fresh train
+    # drops directly into the path the orchestrator already reads.
+    ac_disagg_default = Path(cfg.get("models", {}).get("ac", {}).get(
+        "disaggregator_path", "models/ac_disaggregator_v1.pkl"))
+    hp_disagg_default = Path(cfg.get("models", {}).get("heat_pump", {}).get(
+        "disaggregator_path", "models/hp_disaggregator_v1.joblib"))
 
     if "ac_detector" in models_to_train:
         _train_ac_detector(
@@ -133,6 +209,20 @@ def main():
         _train_hp_detector(
             training_data_path,
             models_dir / "hp_detector_v1.joblib",
+            cfg,
+        )
+
+    if "ac_disaggregator" in models_to_train:
+        _train_ac_disaggregator(
+            training_data_path,
+            ac_disagg_default if ac_disagg_default.is_absolute() else _REPO_ROOT / ac_disagg_default,
+            cfg,
+        )
+
+    if "hp_disaggregator" in models_to_train:
+        _train_hp_disaggregator(
+            training_data_path,
+            hp_disagg_default if hp_disagg_default.is_absolute() else _REPO_ROOT / hp_disagg_default,
             cfg,
         )
 

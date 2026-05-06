@@ -10,7 +10,14 @@ import pandas as pd
 
 
 def compute_daily_weather(avg_meteo_15min: pd.DataFrame) -> pd.DataFrame:
-    """Compute daily weather features from 15-min weather time series."""
+    """Compute daily weather features from 15-min weather time series.
+
+    Note: G_daily_raw_sum and G_midday_raw_sum are sums of W/m² readings
+    (not energy in kWh/m²). They are used only for relative monthly
+    percentile-based rad_bucket classification, where absolute units don't
+    matter. For an actual daily-energy figure, see
+    re_nilm.features.weather.compute_daily_radiation (G_daily_kWh_m2).
+    """
     if avg_meteo_15min.empty:
         return pd.DataFrame()
 
@@ -22,13 +29,13 @@ def compute_daily_weather(avg_meteo_15min: pd.DataFrame) -> pd.DataFrame:
     meteo["is_midday"] = (meteo["hour"] >= 10) & (meteo["hour"] < 16)
 
     daily_weather = (
-        meteo.groupby("date")["global_rad_W"].sum().to_frame("G_daily")
+        meteo.groupby("date")["global_rad_W"].sum().to_frame("G_daily_raw_sum")
     )
     midday_weather = (
         meteo.loc[meteo["is_midday"]]
         .groupby("date")["global_rad_W"]
         .sum()
-        .to_frame("G_midday")
+        .to_frame("G_midday_raw_sum")
     )
     daily_weather = daily_weather.join(midday_weather, how="left")
 
@@ -42,11 +49,11 @@ def compute_daily_weather(avg_meteo_15min: pd.DataFrame) -> pd.DataFrame:
     def month_high_q(x):
         return x.quantile(0.8)
 
-    low_q = daily_weather.groupby("month")["G_midday"].transform(month_low_q)
-    high_q = daily_weather.groupby("month")["G_midday"].transform(month_high_q)
+    low_q = daily_weather.groupby("month")["G_midday_raw_sum"].transform(month_low_q)
+    high_q = daily_weather.groupby("month")["G_midday_raw_sum"].transform(month_high_q)
 
     def bucket_row(row, lq, hq):
-        g_mid = row["G_midday"]
+        g_mid = row["G_midday_raw_sum"]
         if pd.isna(g_mid):
             return "unknown"
         if g_mid <= lq:

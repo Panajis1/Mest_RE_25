@@ -11,6 +11,9 @@ Example:
       --prob-summary data/out/capacity_autosave.parquet \\
       --pv-indicators data/out/pv_indicators_clean.parquet \\
       --metadata-dir data/re_data/ETHZ_ALL
+
+Note: In the refactored repo, the default figure output folder is `figures/results/`
+via `config/default.yaml` (runtime scripts use the config value).
 """
 from __future__ import annotations
 

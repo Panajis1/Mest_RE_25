@@ -42,6 +42,52 @@ def test_streaming_engine_parts_resume_with_text_checkpoint(tmp_path):
     assert pd.read_parquet(out_path)["customer_id"].nunique() == 5
 
 
+_WORKER_INIT_STATE: dict = {}
+
+
+def _parallel_init(state: dict) -> None:
+    """Worker-pool initializer — verifies state is correctly propagated to children."""
+    global _WORKER_INIT_STATE
+    _WORKER_INIT_STATE = state
+
+
+def _parallel_processor(cid: str) -> dict:
+    """Module-level callable — required for ProcessPoolExecutor pickling."""
+    multiplier = _WORKER_INIT_STATE.get("multiplier", 1)
+    return {"customer_id": cid, "value": int(cid.replace("C", "")) * multiplier}
+
+
+def test_streaming_engine_parallel_processes_all_customers(tmp_path):
+    """The 2-worker ProcessPool path must produce the same output as the
+    sequential path, with state from worker_initargs reaching each worker."""
+    out_path = tmp_path / "result.parquet"
+    ckpt_path = tmp_path / "result_ckpt.parquet"
+    all_ids = [f"C{i}" for i in range(8)]
+
+    engine = StreamingEngine(
+        n_workers=2,
+        batch_size=3,
+        resume=True,
+        checkpoint_path=ckpt_path,
+        write_mode="parts",
+        checkpoint_format="text",
+    )
+    result = engine.run(
+        all_ids,
+        _parallel_processor,
+        out_path,
+        worker_initializer=_parallel_init,
+        worker_initargs=({"multiplier": 10},),
+    )
+
+    assert len(result) == 8
+    assert set(result["customer_id"]) == set(all_ids)
+    # Each worker should have applied the multiplier from worker_initargs.
+    expected = {f"C{i}": i * 10 for i in range(8)}
+    actual = {row["customer_id"]: row["value"] for _, row in result.iterrows()}
+    assert actual == expected
+
+
 def test_streaming_engine_text_checkpoint_reads_legacy_parquet(tmp_path):
     out_path = tmp_path / "result.parquet"
     ckpt_path = tmp_path / "result_ckpt.parquet"

@@ -25,7 +25,7 @@ re_nilm/
     streaming.py          # batched checkpointed processing engine
     orchestrator.py       # end-to-end pipeline composition
   portfolio/              # aggregation, evaluation, forecasting helpers
-  training/               # AC and HP detector trainers
+  training/               # AC/HP detector + disaggregator trainers
   visualization/          # customer and portfolio plotting utilities
 
 config/
@@ -36,11 +36,10 @@ scripts/
   run_pipeline.py         # main pipeline CLI
   train_models.py         # detector training CLI
   export_figures.py       # portfolio PNG export CLI
-  validate_detectors.py   # comparison against legacy detector logic
 
-models/                   # serialized model artifacts
+models/                   # serialized model artifacts (+ local cache/output subdirs)
 data/                     # raw, processed, and output data
-docs/figures/results/     # exported PNG figures
+figures/results/          # exported PNG figures
 tests/                    # unit and integration tests
 ```
 
@@ -89,7 +88,7 @@ python scripts/export_figures.py --config config/re_production.yaml
 
 The joined scalar output is written to
 `data/processed/out/results_all_customers.parquet`. Portfolio PNGs are written
-to `docs/figures/results`.
+to `figures/results`.
 
 ## Dependency Management
 
@@ -174,7 +173,7 @@ models:
 
 output:
   results_dir: "data/processed/out"
-  figures_dir: "docs/figures/results"
+  figures_dir: "figures/results"
 ```
 
 `config/re_production.yaml` currently overrides the data paths, enables all
@@ -394,27 +393,71 @@ fails:
 pip install -e ".[dev]"
 ```
 
-## Training AC and HP Models
+## Training Models
 
-AC and HP detectors are Random Forest models trained on labelled Dataport
-households. The training dataset should contain per-customer features and labels
-such as `has_ac` and `hp_type`.
+`scripts/train_models.py` is the single entry point for training all four ML
+artifacts the pipeline can consume. Each component is independently
+trainable — pass any subset of names to `--models`. Existing artifacts at the
+output paths are overwritten.
+
+| Component | `--models` value | Output | Class type |
+|---|---|---|---|
+| AC detector | `ac_detector` | `models/ac_detector_v1.joblib` | RandomForest binary classifier |
+| HP detector | `hp_detector` | `models/hp_detector_v1.joblib` | RandomForest 3-class classifier |
+| AC disaggregator | `ac_disaggregator` | `models/ac_disaggregator_v1.pkl` (+ `_features.json` sidecar) | Two-stage HistGradientBoosting (on/off classifier + kW regressor) |
+| HP disaggregator | `hp_disaggregator` | `models/hp_disaggregator_v1.joblib` (+ `_features.json` sidecar) | Two-stage HistGradientBoosting (on/off classifier + ratio regressor) |
+
+All four trainers consume the same raw training parquet
+`all_sources_load_with_weather.parquet` with columns
+`[type, source, dt_utc, glob_rad, value_kw_mean, id_customer, temp]`. Detector
+trainers also accept a pre-computed per-customer feature table.
 
 ```bash
+# Train everything in one pass
 python scripts/train_models.py \
   --config config/re_production.yaml \
   --training-data data/processed/training/all_sources_load_with_weather.parquet \
-  --models ac_detector,hp_detector
+  --models ac_detector,hp_detector,ac_disaggregator,hp_disaggregator
+
+# Retrain only the AC disaggregator (e.g. after a feature-engineering change)
+python scripts/train_models.py --models ac_disaggregator
+
+# Retrain only the HP disaggregator with a different training file
+python scripts/train_models.py \
+  --models hp_disaggregator \
+  --training-data path/to/custom_training.parquet
 ```
 
-The script writes `models/ac_detector_v1.joblib` and
-`models/hp_detector_v1.joblib`. The bundled runtime pins scikit-learn to
-`>=1.3,<1.4`; regenerate model artifacts in the same environment if loading
-fails with pickle, `_loss`, or NumPy `BitGenerator` errors.
+### Trainer behaviour
 
-The AC disaggregator artifact is separate from detector training:
-`models/ac_disaggregator_v1.pkl`. The HP disaggregator is
-`models/hp_disaggregator_v1.joblib`.
+- **Detectors** (`ac_detector`, `hp_detector`) split *by customer* (held-out
+  customers in the test set), report a weighted F1, and save a single joblib
+  file used by `ACDetector.load` / `HeatPumpDetector.load`.
+- **Disaggregators** (`ac_disaggregator`, `hp_disaggregator`) also split by
+  customer, but train two-stage models (on/off classifier + kW regressor) on
+  per-row labels from sub-meters. Each saves a model artifact plus a JSON
+  sidecar (`<stem>_features.json`) with the exact feature column order, which
+  `ACDisaggregationEstimator.load` / `HPDisaggregationEstimator.load` consume.
+  The HP disaggregator only trains on customers labelled `winter_hp` and drops
+  PV-heavy customers (≥3 % export rows), matching the legacy behaviour.
+
+### Output paths
+
+By default, disaggregator outputs use the paths the orchestrator already reads
+(`models.ac.disaggregator_path` and `models.heat_pump.disaggregator_path` in
+config). A freshly trained model drops in immediately; bump the version number
+in config (e.g. `ac_disaggregator_v2.pkl`) if you want to keep the old artifact
+side-by-side for A/B comparison.
+
+### sklearn pinning
+
+The bundled runtime pins scikit-learn to `>=1.3,<1.4`. The legacy
+`ac_disaggregator_v1.pkl` shipped with the repo was serialised under sklearn
+1.8 / numpy 2.x and goes through a compatibility shim at load time. A
+freshly retrained model from this CLI is saved with **current** sklearn 1.3.x,
+so the shim is no longer needed for that artifact. If model loading fails with
+pickle, `_loss`, or NumPy `BitGenerator` errors, regenerate inside this
+`.venv`.
 
 ## Validation and Tests
 
@@ -429,18 +472,6 @@ Run the synthetic integration test suite:
 ```bash
 python -m pytest tests/integration/ -v -m integration
 ```
-
-Validate detector outputs against legacy scripts when real data and weather are
-available:
-
-```bash
-python scripts/validate_detectors.py \
-  --data-dir data/re_data/ETHZ_ALL \
-  --weather data/processed/out/weather_meteoswiss_None_None.parquet
-```
-
-`validate_detectors.py` depends on legacy modules under `old_files/`; it is a
-data validation utility, not a lightweight CI smoke test.
 
 ## Demo Notebook
 

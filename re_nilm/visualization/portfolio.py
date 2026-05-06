@@ -31,6 +31,7 @@ _APPLIANCE_SPECS = [
     ("Battery", "has_battery", "prob_battery"),
     ("EV", "has_ev", "prob_ev"),
 ]
+_APPLIANCE_PROB_COLS = {label.lower(): prob_col for label, _, prob_col in _APPLIANCE_SPECS}
 
 
 def _require_plotly() -> None:
@@ -317,6 +318,55 @@ def plot_appliance_probability_distributions(
         fig.update_yaxes(title_text="Customers" if idx == 1 else "", row=1, col=idx)
 
     fig.update_layout(title=title, bargap=0.05)
+    return fig
+
+
+def plot_appliance_probability_distribution(
+    results: pd.DataFrame,
+    appliance: str,
+    title: str | None = None,
+):
+    """Histogram of one appliance detector probability column.
+
+    Args:
+        results: Per-customer joined results table.
+        appliance: One of "pv", "ac", "heat pump"/"hp", "battery", "ev".
+        title: Optional custom title.
+
+    Returns:
+        Plotly Figure for a single appliance probability distribution.
+    """
+    _require_plotly()
+
+    key = appliance.strip().lower().replace("_", " ").replace("-", " ")
+    if key in {"heat pump", "hp"}:
+        key = "heat pump"
+    prob_col = _APPLIANCE_PROB_COLS.get(key)
+    if prob_col is None:
+        valid = ", ".join(sorted(_APPLIANCE_PROB_COLS))
+        raise ValueError(f"Unknown appliance '{appliance}'. Valid values: {valid}, hp")
+    if prob_col not in results.columns:
+        raise ValueError(f"results must include '{prob_col}'")
+
+    probs = pd.to_numeric(results[prob_col], errors="coerce").dropna().clip(0, 1)
+    if probs.empty:
+        raise ValueError(f"No valid values in '{prob_col}'")
+
+    pretty = "Heat pump" if key == "heat pump" else key.upper()
+    fig = go.Figure(
+        go.Histogram(
+            x=probs,
+            nbinsx=30,
+            hovertemplate="Probability: %{x:.2f}<br>Customers: %{y}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=title or f"{pretty} Detection Probability Distribution",
+        xaxis_title="Probability",
+        yaxis_title="Customers",
+        bargap=0.05,
+    )
+    fig.update_xaxes(range=[0, 1])
     return fig
 
 
