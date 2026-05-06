@@ -126,6 +126,66 @@ def main():
     logger.info("%d figures written to %s", len(figures), figures_dir)
     print(f"\nExported {len(figures)} figures → {figures_dir}")
 
+    _print_stats(results, results_dir)
+
+
+def _print_stats(results: pd.DataFrame, results_dir: Path) -> None:
+    import numpy as np
+
+    sep = "=" * 60
+    print(f"\n{sep}")
+    print("  PRESENTATION STATISTICS SUMMARY")
+    print(sep)
+    n_total = len(results)
+    print(f"  Total customers analysed : {n_total:,}")
+
+    appliance_cols = {
+        "AC":         "has_ac",
+        "Heat Pump":  "has_hp",
+        "EV":         "has_ev",
+        "PV":         "has_pv",
+        "Battery":    "has_battery",
+    }
+    print(f"\n  {'Appliance':<14} {'Detected':>10} {'Share':>8}  {'95% CI':>16}")
+    print(f"  {'-'*14} {'-'*10} {'-'*8}  {'-'*16}")
+    for name, col in appliance_cols.items():
+        if col not in results.columns:
+            continue
+        valid = results[col].notna()
+        n = int(valid.sum())
+        k = int((results.loc[valid, col].astype(bool)).sum())
+        p = k / n if n else 0.0
+        # Wilson CI
+        from scipy import stats as _stats
+        z = 1.96
+        denom = 1 + z**2 / n
+        centre = (p + z**2 / (2*n)) / denom
+        margin = z * ((p*(1-p)/n + z**2/(4*n**2))**0.5) / denom
+        lo, hi = max(0, centre - margin) * 100, min(100, centre + margin) * 100
+        print(f"  {name:<14} {k:>10,} {p*100:>7.1f}%  [{lo:.1f}%–{hi:.1f}%]")
+
+    # AC-specific stats
+    if "has_ac" in results.columns and "prob_ac" in results.columns:
+        ac = results[results["has_ac"] == True]
+        print(f"\n  AC Detection detail")
+        print(f"    Mean prob_ac (all)    : {results['prob_ac'].mean():.3f}")
+        print(f"    Mean prob_ac (AC+)   : {results.loc[results['has_ac']==True,'prob_ac'].mean():.3f}")
+
+    # AC disaggregation
+    disagg_path = results_dir / "ac_disagg_15min.parquet"
+    if disagg_path.exists():
+        import pandas as pd
+        d = pd.read_parquet(disagg_path)
+        if "ac_kw_pred" in d.columns:
+            per_cust = d.groupby("customer_id")["ac_kw_pred"].mean()
+            print(f"\n  AC Disaggregation")
+            print(f"    Customers disaggregated : {len(per_cust):,}")
+            print(f"    Mean AC load (kW)       : {per_cust.mean():.3f}")
+            print(f"    Median AC load (kW)     : {per_cust.median():.3f}")
+            print(f"    Mean annual AC (kWh)    : {(per_cust * 8760).mean():.0f}")
+
+    print(f"\n{sep}\n")
+
 
 if __name__ == "__main__":
     main()

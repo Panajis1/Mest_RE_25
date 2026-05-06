@@ -65,6 +65,8 @@ _WORKER_STATE: Dict[str, Any] = {}
 
 def _init_worker(state: Dict[str, Any]) -> None:
     """Initialise per-process worker state. Called once per worker by ProcessPoolExecutor."""
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
     global _WORKER_STATE
     _WORKER_STATE = state
 
@@ -114,13 +116,13 @@ def load_config(path: str | Path) -> Dict[str, Any]:
 
     cfg: Dict[str, Any] = {}
     if default_path.exists():
-        with open(default_path) as f:
+        with open(default_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
 
     if path is not None:
         override_path = Path(path)
         if override_path.exists():
-            with open(override_path) as f:
+            with open(override_path, encoding="utf-8") as f:
                 override = yaml.safe_load(f) or {}
             cfg = _deep_merge(cfg, override)
         else:
@@ -564,7 +566,7 @@ class PipelineOrchestrator:
         from re_nilm.detectors.ac import ACDetector
         detector = ACDetector.load(
             detector_path,
-            prob_threshold=ac_cfg.get("prob_threshold", 0.55),
+            prob_threshold=ac_cfg.get("prob_threshold", 0.66),
             day_rad_threshold=float(ac_cfg.get("day_rad_threshold", 50.0)),
             min_day_rows=int(ac_cfg.get("min_day_rows", 100)),
         )

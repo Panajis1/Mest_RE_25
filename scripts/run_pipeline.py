@@ -38,7 +38,11 @@ Output:
 import argparse
 import logging
 import sys
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings("ignore", message=".*sklearn.utils.parallel.delayed.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 # Allow running from the repo root without pip install -e .
 _REPO_ROOT = Path(__file__).resolve().parent.parent

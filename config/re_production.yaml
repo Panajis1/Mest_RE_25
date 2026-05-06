@@ -2,8 +2,8 @@
 # Update data paths to match your local data layout before running.
 
 data:
-  re_data_dir: "C:/Users/jiniy/Desktop/CS/ETHZ_ALL"
-  metadata_dir: "C:/Users/jiniy/Desktop/CS/ETHZ_ALL"
+  re_data_dir: "data/re_data/ETHZ_ALL"
+  metadata_dir: "data/re_data/ETHZ_ALL"
 
 pipeline:
   n_workers: "auto"

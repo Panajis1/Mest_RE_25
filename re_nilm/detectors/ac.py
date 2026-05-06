@@ -65,6 +65,11 @@ class ACDetector(AbstractDetector):
     def load(cls, path: Path, **kwargs) -> "ACDetector":
         """Load a serialized RF pipeline from path."""
         model = joblib.load(path)
+        # Disable RF internal parallelism — the pipeline already uses multi-process
+        # workers, so per-worker RF parallelism is redundant and triggers a sklearn
+        # 1.8.0 warning about joblib.Parallel vs sklearn.utils.parallel.Parallel.
+        if hasattr(model, "named_steps") and "clf" in model.named_steps:
+            model.named_steps["clf"].n_jobs = 1
         return cls(model=model, **kwargs)
 
     def predict_customer(

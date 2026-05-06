@@ -18,6 +18,47 @@ from re_nilm.estimators._ac_disagg_v1 import (
 )
 
 
+def _patch_estimator_compat(obj):
+    """Patch sklearn 1.3.x → 1.8.x attribute renames on any estimator tree."""
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+    from sklearn.ensemble import (
+        RandomForestClassifier, RandomForestRegressor,
+        HistGradientBoostingClassifier, HistGradientBoostingRegressor,
+    )
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+    candidates = []
+    if isinstance(obj, Pipeline):
+        candidates = [step for _, step in obj.steps]
+    elif hasattr(obj, "__dict__"):
+        candidates = list(vars(obj).values())
+    candidates.append(obj)
+
+    for est in candidates:
+        if isinstance(est, SimpleImputer):
+            if hasattr(est, "_fit_dtype") and not hasattr(est, "_fill_dtype"):
+                est._fill_dtype = est._fit_dtype
+        if isinstance(est, (RandomForestClassifier, RandomForestRegressor)):
+            for tree in getattr(est, "estimators_", []):
+                if isinstance(tree, (DecisionTreeClassifier, DecisionTreeRegressor)):
+                    if not hasattr(tree, "monotonic_cst"):
+                        tree.monotonic_cst = None
+        if isinstance(est, (HistGradientBoostingClassifier, HistGradientBoostingRegressor)):
+            # Attributes added/removed between sklearn 1.3.x and 1.8.x
+            for attr, default in [
+                ("_preprocessor", None),
+                ("_is_fitted", True),
+            ]:
+                if not hasattr(est, attr):
+                    setattr(est, attr, default)
+        # Recurse into nested sklearn objects
+        if hasattr(est, "__dict__") and est is not obj:
+            for v in vars(est).values():
+                if hasattr(v, "fit") or hasattr(v, "predict"):
+                    _patch_estimator_compat(v)
+
+
 def _joblib_load_compat(path: Path):
     """Load a joblib file, bridging numpy 2.x + sklearn 1.8 → 1.x pickle formats.
 
@@ -46,7 +87,7 @@ def _joblib_load_compat(path: Path):
 
     try:
         return joblib.load(path)
-    except (ValueError, TypeError, ModuleNotFoundError):
+    except (ValueError, TypeError, ModuleNotFoundError, AttributeError):
         pass
 
     import numpy.random._pickle as _np_pickle
@@ -89,6 +130,26 @@ def _joblib_load_compat(path: Path):
     _added_loss = "_loss" not in sys.modules
     sys.modules.setdefault("_loss", _sk_loss_ext)
 
+    # Shim 4c: generate missing __pyx_unpickle_Cy* stubs for all Cy* classes
+    # (sklearn 1.3.x pickles reference these; removed in 1.8.x).
+    import inspect as _inspect
+    _added_cy_ctors: list = []
+    for _name, _cls in _inspect.getmembers(_sk_loss_ext, _inspect.isclass):
+        _ctor_name = f"__pyx_unpickle_{_name}"
+        if _name.startswith("Cy") and not hasattr(_sk_loss_ext, _ctor_name):
+            def _make_ctor(cls):
+                def _ctor(tp, checksum, state, _c=cls):
+                    obj = (_c if tp is None else tp).__new__(_c if tp is None else tp)
+                    if state is not None:
+                        try:
+                            obj.__setstate__(state)
+                        except Exception:
+                            pass
+                    return obj
+                return _ctor
+            setattr(_sk_loss_ext, _ctor_name, _make_ctor(_cls))
+            _added_cy_ctors.append(_ctor_name)
+
     # Shim 4b: make the legacy ac_disaggregation module importable.
     _added_legacy_path = _legacy_model_dir not in sys.path
     if _added_legacy_path:
@@ -105,6 +166,8 @@ def _joblib_load_compat(path: Path):
             sys.modules.pop("_loss", None)
         if _added_legacy_path and _legacy_model_dir in sys.path:
             sys.path.remove(_legacy_model_dir)
+        for _ctor_name in _added_cy_ctors:
+            _sk_loss_ext.__dict__.pop(_ctor_name, None)
 
 
 class ACDisaggregationEstimator(AbstractEstimator):
@@ -127,6 +190,7 @@ class ACDisaggregationEstimator(AbstractEstimator):
     def load(cls, path: Path, features_path: Optional[Path] = None, **kwargs) -> "ACDisaggregationEstimator":
         """Load serialized AcTwoStageModel and optional feature_cols JSON sidecar."""
         model = _joblib_load_compat(Path(path))
+        _patch_estimator_compat(model)
         feature_cols = None
         if features_path is not None and Path(features_path).exists():
             with open(features_path) as f:
@@ -226,6 +290,12 @@ class ACDisaggregationEstimator(AbstractEstimator):
         feat_df = self._build_features(customer_ts, weather, pv_capacity_kwp=pv_capacity_kwp)
         if feat_df.empty:
             return None
+
+        # Fill sub-meter columns not available in production (EV/HP/PV) with 0
+        if self.feature_cols:
+            for col in self.feature_cols:
+                if col not in feat_df.columns:
+                    feat_df[col] = 0.0
 
         try:
             # model.predict() handles imputation, month gating, clipping, and ac_kw output
