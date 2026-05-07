@@ -30,16 +30,16 @@ class BatteryDetector(AbstractDetector):
         dark_day_rad_max_w: Max peak W/m² for a day to count as 'dark'.
         sunny_day_rad_min_w: Min peak W/m² for a day to count as 'sunny'.
         temp_buffer_c: Temperature matching tolerance when pairing dark/sunny days.
-        sigmoid_intercept: Sigmoid bias term (more negative = stricter). Tuned to -2.5.
+        sigmoid_intercept: Sigmoid bias term (more negative = stricter). Tuned to -3.0.
         strict_min_matched_sunny_days: If fewer matched sunny days are found, apply a
             z-score penalty of `low_matched_days_z_penalty`. Tuned to 7.
         low_matched_days_z_penalty: Penalty subtracted from z when matched days are
             below `strict_min_matched_sunny_days`. Tuned to 0.5.
         nominal_capacity_discharge_fraction: Assumed fraction of battery discharged per
             evening event, used to scale shift energy → capacity estimate. Tuned to 0.25.
-        pv_anchor_kwh_per_kwp: kWh/kWp used for the PV-size capacity anchor. Tuned to 1.3.
+        pv_anchor_kwh_per_kwp: kWh/kWp used for the PV-size capacity anchor. Tuned to 1.5.
         pv_anchor_blend_weight: Blend weight for the PV anchor in capacity estimation.
-            Tuned to 0.45.
+            Tuned to 0.55.
     """
 
     def __init__(
@@ -49,12 +49,12 @@ class BatteryDetector(AbstractDetector):
         dark_day_rad_max_w: float = 100.0,
         sunny_day_rad_min_w: float = 100.0,
         temp_buffer_c: float = 2.0,
-        sigmoid_intercept: float = -2.5,
+        sigmoid_intercept: float = -3.0,
         strict_min_matched_sunny_days: int = 7,
         low_matched_days_z_penalty: float = 0.5,
         nominal_capacity_discharge_fraction: float = 0.25,
-        pv_anchor_kwh_per_kwp: float = 1.3,
-        pv_anchor_blend_weight: float = 0.45,
+        pv_anchor_kwh_per_kwp: float = 1.5,
+        pv_anchor_blend_weight: float = 0.55,
     ):
         self.classification_threshold = classification_threshold
         self.enforce_pv_required = enforce_pv_required
