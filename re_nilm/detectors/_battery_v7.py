@@ -1,4 +1,24 @@
-"""Internal battery v7 detection logic migrated from legacy script."""
+"""Internal battery v7 detection logic.
+
+Scores each customer with a logistic sigmoid over five evening load-shift signals,
+then multiplies by two physical guardrail scalers before thresholding at 0.5.
+
+Signal weights (z-score):
+  z = SIGMOID_INTERCEPT
+    + SIGMOID_PEAK_SHIFT_WEIGHT   * peak_shift_minutes
+    + SIGMOID_GAP_RATIO_WEIGHT    * gap_ratio
+    + INJECTION_BONUS_WEIGHT      * (INJECTION_RATIO_REFERENCE - inj_ratio)
+    + SIGMOID_CONSISTENCY_WEIGHT  * consistency
+    + SIGMOID_SHIFT_RATIO_WEIGHT  * shift_ratio
+
+Guardrails (applied after sigmoid):
+  security_scaler: 0.4 if avg_gap_kwh outside [2, 30] kWh, else 1.0
+  phys_scaler:     0.7 if avg_gap_kwh > 1.5 × mean evening PV potential, else 1.0
+
+Key output fields (always present, 0 for early-rejected customers):
+  n_matched_sunny_days: sunny days that could be paired with a dark-day temperature bin
+  n_dark_days:          dark reference days available in the customer's observation window
+"""
 
 from __future__ import annotations
 
@@ -9,53 +29,67 @@ import pandas as pd
 
 LOCAL_TIMEZONE = "Europe/Zurich"
 WEATHER_MERGE_DIRECTION = "backward"
-DARK_DAY_RAD_MAX_W = 100.0
-SUNNY_DAY_RAD_MIN_W = 100.0
+DARK_DAY_RAD_MAX_W = 100.0           # W/m² — days below this are 'dark' reference days
+SUNNY_DAY_RAD_MIN_W = 100.0          # W/m² — days at or above this are 'sunny'
 MIN_DARK_REFERENCE_DAYS = 2
 MIN_SUNNY_MATCH_DAYS = 2
-TEMP_MATCH_BUFFER_C = 2.0
+TEMP_MATCH_BUFFER_C = 2.0            # ±°C band for pairing dark/sunny days by temperature
 SUNSET_SCAN_START_HOUR = 14
-SUNSET_RAD_THRESHOLD_W = 12
+SUNSET_RAD_THRESHOLD_W = 12          # W/m² — radiation below this marks effective sunset
 DEFAULT_SUNSET_TIME = time(18, 0)
 EVENING_END_TIME = "23:45"
-RAD_W_TO_KWH_PER_15MIN = 0.00025
-PV_POTENTIAL_EFFICIENCY = 0.85
-DEFAULT_PV_CAPACITY_KWP = 5.0
+RAD_W_TO_KWH_PER_15MIN = 0.00025    # W → kWh per 15-min slot (= 1/4000)
+PV_POTENTIAL_EFFICIENCY = 0.85       # system efficiency for PV potential estimate
+DEFAULT_PV_CAPACITY_KWP = 5.0       # fallback when PV capacity is unknown
+
+# --- Detection threshold ---
 BATTERY_CLASSIFICATION_THRESHOLD = 0.5
 ENFORCE_PV_FOR_BATTERY_DETECTION = True
 NON_PV_REJECTION_STATUS = "REJECTED: No PV Signal"
-SIGMOID_INTERCEPT = -3.0
-SIGMOID_PEAK_SHIFT_WEIGHT = 0.04
-SIGMOID_GAP_RATIO_WEIGHT = 6.2
-INJECTION_RATIO_REFERENCE = 0.4
-INJECTION_BONUS_WEIGHT = 2.0
-SIGMOID_CONSISTENCY_WEIGHT = 1.1
-SIGMOID_SHIFT_RATIO_WEIGHT = 0.7
-STRICT_MIN_MATCHED_SUNNY_DAYS = 7
-LOW_MATCHED_DAYS_Z_PENALTY = 0.5
-CONSISTENCY_GAP_THRESHOLD_KWH = 0.4
+
+# --- Sigmoid score weights ---
+SIGMOID_INTERCEPT = -2.5             # null-hypothesis bias; more negative = stricter
+SIGMOID_PEAK_SHIFT_WEIGHT = 0.04     # weight for evening peak delay (minutes)
+SIGMOID_GAP_RATIO_WEIGHT = 6.2       # dominant signal: normalised evening gap
+INJECTION_RATIO_REFERENCE = 0.6      # expected grid injection fraction for PV without storage
+                                     # (Luthander et al. 2015: 50–70 % for unmitigated systems)
+INJECTION_BONUS_WEIGHT = 2.0         # reward for injecting less than the reference
+SIGMOID_CONSISTENCY_WEIGHT = 1.1     # reward for consistent gap across sunny days
+SIGMOID_SHIFT_RATIO_WEIGHT = 0.7     # reward for high inferred shift relative to PV potential
+STRICT_MIN_MATCHED_SUNNY_DAYS = 7    # fewer matched days → apply z-score penalty
+LOW_MATCHED_DAYS_Z_PENALTY = 0.5     # penalty subtracted from z when days < threshold
+CONSISTENCY_GAP_THRESHOLD_KWH = 0.4  # min gap (kWh) for a day to count toward consistency
+
+# --- Injection ratio bounds ---
 INJECTION_RATIO_MIN_POTENTIAL_KWH = 0.1
 INJECTION_RATIO_CLIP_MIN = 0.0
 INJECTION_RATIO_CLIP_MAX = 2.0
 SIGMOID_CLIP_MIN = -20
 SIGMOID_CLIP_MAX = 20
-SECURITY_MIN_GAP_KWH = 2.0
+
+# --- Physical guardrail scalers ---
+SECURITY_MIN_GAP_KWH = 2.0          # gaps below 2 kWh or above 30 kWh get 0.4 scaler
 SECURITY_MAX_GAP_KWH = 30.0
 SECURITY_OUTSIDE_SCALER = 0.4
-PHYSICAL_GAP_FACTOR = 2.5
-PHYSICAL_OUTSIDE_SCALER = 0.7
+PHYSICAL_GAP_FACTOR = 1.5           # gap > 1.5 × mean evening PV potential gets 0.7 scaler
+PHYSICAL_OUTSIDE_SCALER = 0.7       # (compares against evening window only, not full day)
+
+# --- Shift blending (when added self-consumption signal is present) ---
 SHIFT_BLEND_GAP_WEIGHT = 0.60
 SHIFT_BLEND_SELFCONS_WEIGHT = 0.40
-CAPACITY_ESTIMATE_QUANTILE = 0.90
+
+# --- Capacity estimation ---
+CAPACITY_ESTIMATE_QUANTILE = 0.90   # 90th percentile of daily shifts → empirical capacity
 CAPACITY_LOW_QUANTILE = 0.25
 CAPACITY_HIGH_QUANTILE = 0.75
-CAPACITY_MIN_REALISTIC_KWH = 5.0
-CAPACITY_MAX_REALISTIC_KWH = 30.0
-NOMINAL_CAPACITY_DISCHARGE_FRACTION = 0.25
+CAPACITY_MIN_REALISTIC_KWH = 5.0    # below this: capacity set to NaN (implausible)
+CAPACITY_MAX_REALISTIC_KWH = 30.0   # hard ceiling after all other adjustments
+NOMINAL_CAPACITY_DISCHARGE_FRACTION = 0.40  # assumed DoD per evening event (40 % of capacity)
 MIN_SHIFT_FOR_NOMINAL_CAPACITY_KWH = 0.0
-PV_ANCHOR_KWH_PER_KWP = 1.5
-PV_ANCHOR_BLEND_WEIGHT = 0.55
-CAPACITY_MAX_PER_KWP = 4.5
+PV_ANCHOR_KWH_PER_KWP = 1.0        # Swiss 1:1 rule of thumb: 1 kWh capacity per kWp PV
+PV_ANCHOR_BLEND_WEIGHT = 0.55       # 55 % anchor, 45 % empirical shift in final estimate
+CONSUMPTION_ANCHOR_KWH_PER_ANNUAL_KWH = 0.001  # 1 kWh per 1 000 kWh annual consumption
+CAPACITY_MAX_PER_KWP = 2.0          # hard physical cap: 2 kWh per kWp of PV installed
 SET_CAPACITY_NAN_WHEN_BELOW_REALISTIC_FLOOR = True
 PEAK_SHIFT_STEP_MINUTES = 15
 
@@ -112,6 +146,9 @@ def analyze_battery_residential_v7(
     nominal_capacity_discharge_fraction=None,
     pv_anchor_kwh_per_kwp=None,
     pv_anchor_blend_weight=None,
+    consumption_anchor_kwh_per_annual_kwh=None,
+    min_dark_reference_days=None,
+    min_sunny_match_days=None,
 ):
     _sigmoid_intercept = SIGMOID_INTERCEPT if sigmoid_intercept is None else sigmoid_intercept
     _strict_min_days = STRICT_MIN_MATCHED_SUNNY_DAYS if strict_min_matched_sunny_days is None else strict_min_matched_sunny_days
@@ -119,11 +156,16 @@ def analyze_battery_residential_v7(
     _discharge_fraction = NOMINAL_CAPACITY_DISCHARGE_FRACTION if nominal_capacity_discharge_fraction is None else nominal_capacity_discharge_fraction
     _pv_anchor_kwh_per_kwp = PV_ANCHOR_KWH_PER_KWP if pv_anchor_kwh_per_kwp is None else pv_anchor_kwh_per_kwp
     _pv_anchor_blend = PV_ANCHOR_BLEND_WEIGHT if pv_anchor_blend_weight is None else pv_anchor_blend_weight
+    _consumption_anchor_rate = CONSUMPTION_ANCHOR_KWH_PER_ANNUAL_KWH if consumption_anchor_kwh_per_annual_kwh is None else consumption_anchor_kwh_per_annual_kwh
+    _min_dark_days = MIN_DARK_REFERENCE_DAYS if min_dark_reference_days is None else min_dark_reference_days
+    _min_sunny_days = MIN_SUNNY_MATCH_DAYS if min_sunny_match_days is None else min_sunny_match_days
 
     res = {
         "battery_prob": 0,
         "has_battery": "No",
         "status": "Success",
+        "n_matched_sunny_days": 0,
+        "n_dark_days": 0,
         "observed_gap_kwh": 0,
         "profiles": None,
         "estimated_battery_capacity_kwh": np.nan,
@@ -182,10 +224,10 @@ def analyze_battery_residential_v7(
 
         dark_days = daily[daily["global_rad_W"] < DARK_DAY_RAD_MAX_W].index
         sunny_days = daily[daily["global_rad_W"] >= SUNNY_DAY_RAD_MIN_W].index
-        if len(dark_days) < MIN_DARK_REFERENCE_DAYS:
+        if len(dark_days) < _min_dark_days:
             res["status"] = "REJECTED: No Baseline"
             return res
-        if len(sunny_days) < MIN_SUNNY_MATCH_DAYS:
+        if len(sunny_days) < _min_sunny_days:
             res["status"] = "REJECTED: No Sunny Match"
             return res
 
@@ -236,7 +278,7 @@ def analyze_battery_residential_v7(
 
         temp_band = temp_buffer if temp_buffer and temp_buffer > 0 else TEMP_MATCH_BUFFER_C
         evening_daily["temp_bin"] = (
-            np.round(evening_daily["temp_mean_c"] / temp_band) * temp_band
+            np.round(evening_daily["temp_mean_c"].astype("float64") / temp_band) * temp_band
         ).astype(float)
 
         dark_daily = evening_daily.loc[
@@ -245,10 +287,10 @@ def analyze_battery_residential_v7(
         sunny_daily = evening_daily.loc[
             evening_daily.index.intersection(pd.DatetimeIndex(sunny_days))
         ].copy()
-        if len(dark_daily) < MIN_DARK_REFERENCE_DAYS:
+        if len(dark_daily) < _min_dark_days:
             res["status"] = "REJECTED: No Baseline"
             return res
-        if len(sunny_daily) < MIN_SUNNY_MATCH_DAYS:
+        if len(sunny_daily) < _min_sunny_days:
             res["status"] = "REJECTED: No Sunny Match"
             return res
 
@@ -259,7 +301,7 @@ def analyze_battery_residential_v7(
         sunny_matched = sunny_daily.merge(
             dark_by_bin, left_on="temp_bin", right_index=True, how="inner"
         )
-        if len(sunny_matched) < MIN_SUNNY_MATCH_DAYS:
+        if len(sunny_matched) < _min_sunny_days:
             res["status"] = "REJECTED: No Temp-Matched Sunny"
             return res
 
@@ -295,6 +337,13 @@ def analyze_battery_residential_v7(
             sunny_matched["evening_gap_kwh"] / sunny_matched["dark_evening_baseline_kwh"],
             0.0,
         )
+
+        # Annual consumption estimate: annualise from available data span.
+        _span_days = (df_customer.index.max() - df_customer.index.min()).days
+        if _span_days >= 30 and "CONSO_KWH" in df_customer.columns:
+            annual_kwh_est = float(df_customer["CONSO_KWH"].sum()) / _span_days * 365.0
+        else:
+            annual_kwh_est = np.nan
 
         pv_capacity_kwp = _pick_pv_capacity_kwp(pv_row)
         pv_prob = _extract_pv_probability(pv_row)
@@ -384,9 +433,10 @@ def analyze_battery_residential_v7(
             if SECURITY_MIN_GAP_KWH <= avg_gap_kwh <= SECURITY_MAX_GAP_KWH
             else SECURITY_OUTSIDE_SCALER
         )
+        evening_pot_high = float(sunny_matched["pv_potential_kwh"].mean()) if len(sunny_matched) > 0 else np.nan
         phys_scaler = (
             1.0
-            if avg_gap_kwh <= (pot_high * PHYSICAL_GAP_FACTOR)
+            if pd.isna(evening_pot_high) or evening_pot_high <= 0 or avg_gap_kwh <= (evening_pot_high * PHYSICAL_GAP_FACTOR)
             else PHYSICAL_OUTSIDE_SCALER
         )
 
@@ -399,16 +449,37 @@ def analyze_battery_residential_v7(
         )
         capacity_capped_by_pv_scaling = False
 
+        # Effective capacity anchor: PV size (1:1 minimum) raised by consumption rule.
+        # Rule A: 1 kWh per kWp of PV (floor).
+        # Rule B: 1 kWh per 1 000 kWh annual consumption (scales up from PV floor).
+        _pv_anchor = (
+            pv_capacity_kwp * _pv_anchor_kwh_per_kwp if pd.notna(pv_capacity_kwp) else np.nan
+        )
+        _cons_anchor = (
+            annual_kwh_est * _consumption_anchor_rate if pd.notna(annual_kwh_est) else np.nan
+        )
+        if pd.notna(_pv_anchor) and pd.notna(_cons_anchor):
+            effective_anchor = max(_pv_anchor, _cons_anchor)
+            _anchor_method_tag = "pv_and_consumption_anchor"
+        elif pd.notna(_pv_anchor):
+            effective_anchor = _pv_anchor
+            _anchor_method_tag = "pv_anchor_only"
+        elif pd.notna(_cons_anchor):
+            effective_anchor = _cons_anchor
+            _anchor_method_tag = "consumption_anchor_only"
+        else:
+            effective_anchor = np.nan
+            _anchor_method_tag = None
+
         cap_method = "nominal_from_shift_plus_pv_anchor"
         capacity_shift = valid_shift[valid_shift >= MIN_SHIFT_FOR_NOMINAL_CAPACITY_KWH]
         if capacity_shift.empty:
-            # No observable shift: fall back to PV-anchor estimate if PV size is known.
-            if pd.notna(pv_capacity_kwp):
-                pv_anchor = pv_capacity_kwp * _pv_anchor_kwh_per_kwp
-                cap_est = float(np.clip(pv_anchor, CAPACITY_MIN_REALISTIC_KWH, CAPACITY_MAX_REALISTIC_KWH))
+            # No observable shift: fall back to anchor estimate if available.
+            if pd.notna(effective_anchor):
+                cap_est = float(effective_anchor)
                 cap_low = cap_est
                 cap_high = cap_est
-                cap_method = "pv_anchor_only"
+                cap_method = _anchor_method_tag or "pv_anchor_only"
             else:
                 cap_est = np.nan
                 cap_low = np.nan
@@ -417,41 +488,38 @@ def analyze_battery_residential_v7(
         else:
             nominal_capacity_series = capacity_shift / max(_discharge_fraction, 0.05)
 
-            if pd.notna(pv_capacity_kwp):
-                pv_anchor = pv_capacity_kwp * _pv_anchor_kwh_per_kwp
+            if pd.notna(effective_anchor):
                 nominal_capacity_series = (
                     (1.0 - _pv_anchor_blend) * nominal_capacity_series
-                    + _pv_anchor_blend * pv_anchor
+                    + _pv_anchor_blend * effective_anchor
                 )
-                cap_method = "nominal_from_shift_plus_pv_anchor"
+                cap_method = f"nominal_from_shift_plus_{_anchor_method_tag}"
             else:
                 cap_method = "nominal_from_shift_only"
 
-            raw_cap_est = float(
-                nominal_capacity_series.quantile(CAPACITY_ESTIMATE_QUANTILE)
-            )
+            cap_est = float(nominal_capacity_series.quantile(CAPACITY_ESTIMATE_QUANTILE))
             cap_low = float(nominal_capacity_series.quantile(CAPACITY_LOW_QUANTILE))
             cap_high = float(nominal_capacity_series.quantile(CAPACITY_HIGH_QUANTILE))
-            cap_est = raw_cap_est
 
-            if pd.notna(max_physical_from_pv_kwh):
-                capacity_capped_by_pv_scaling = raw_cap_est > max_physical_from_pv_kwh
+        # Apply 2×PV physical cap before floor/ceiling clipping.
+        if pd.notna(max_physical_from_pv_kwh) and pd.notna(cap_est):
+            capacity_capped_by_pv_scaling = cap_est > max_physical_from_pv_kwh
+            if capacity_capped_by_pv_scaling:
+                cap_est = min(cap_est, max_physical_from_pv_kwh)
+                cap_low = min(cap_low, max_physical_from_pv_kwh) if pd.notna(cap_low) else np.nan
+                cap_high = min(cap_high, max_physical_from_pv_kwh) if pd.notna(cap_high) else np.nan
 
-            if SET_CAPACITY_NAN_WHEN_BELOW_REALISTIC_FLOOR and raw_cap_est < CAPACITY_MIN_REALISTIC_KWH:
+        # Below 5 kWh: excluded entirely. Above 30 kWh: capped.
+        if pd.notna(cap_est):
+            if SET_CAPACITY_NAN_WHEN_BELOW_REALISTIC_FLOOR and cap_est < CAPACITY_MIN_REALISTIC_KWH:
                 cap_est = np.nan
                 cap_low = np.nan
                 cap_high = np.nan
                 cap_method = "no_estimate"
             else:
-                cap_est = float(
-                    np.clip(cap_est, CAPACITY_MIN_REALISTIC_KWH, CAPACITY_MAX_REALISTIC_KWH)
-                )
-                cap_low = float(
-                    np.clip(cap_low, CAPACITY_MIN_REALISTIC_KWH, CAPACITY_MAX_REALISTIC_KWH)
-                )
-                cap_high = float(
-                    np.clip(cap_high, CAPACITY_MIN_REALISTIC_KWH, CAPACITY_MAX_REALISTIC_KWH)
-                )
+                cap_est = float(np.clip(cap_est, CAPACITY_MIN_REALISTIC_KWH, CAPACITY_MAX_REALISTIC_KWH))
+                cap_low = float(np.clip(cap_low, CAPACITY_MIN_REALISTIC_KWH, CAPACITY_MAX_REALISTIC_KWH))
+                cap_high = float(np.clip(cap_high, CAPACITY_MIN_REALISTIC_KWH, CAPACITY_MAX_REALISTIC_KWH))
 
         battery_detected_by_score = final_prob >= BATTERY_CLASSIFICATION_THRESHOLD
         battery_detected = (
@@ -470,6 +538,8 @@ def analyze_battery_residential_v7(
             {
                 "battery_prob": round(final_prob * 100, 2),
                 "has_battery": "Yes" if battery_detected else "No",
+                "n_matched_sunny_days": len(sunny_matched),
+                "n_dark_days": len(dark_days),
                 "observed_gap_kwh": round(avg_gap_kwh, 3),
                 "profiles": (prof_dark, prof_sun),
                 "estimated_battery_capacity_kwh": round(cap_est, 3)

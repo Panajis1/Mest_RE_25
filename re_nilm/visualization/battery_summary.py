@@ -15,7 +15,8 @@ _GRID = "#bfbfbf"
 _PROB_CANDIDATES = ("prob_battery", "battery_prob", "battery_probability")
 _STATUS_CANDIDATES = ("battery_status",)
 _CAPACITY_CANDIDATES = ("battery_capacity_kwh", "estimated_battery_capacity_kwh", "capacity_kwh")
-_POWER_CANDIDATES = ("battery_power_kw", "estimated_battery_power_kw", "power_kw")
+_MATCHED_DAYS_CANDIDATES = ("n_matched_sunny_days",)
+_DARK_DAYS_CANDIDATES = ("n_dark_days",)
 _PV_FLAG_CANDIDATES = ("has_pv",)
 _PV_PROB_CANDIDATES = ("prob_pv", "has_pv_prob")
 _PV_CAP_CANDIDATES = ("pv_capacity_kwp", "pv_capacity_ci_upper", "pv_capacity_kwp_floor")
@@ -84,6 +85,109 @@ def _battery_reliable_mask(
         text = results[status_col].astype("string").str.lower().fillna("")
         status_ok = text.eq("success") | text.eq("ok") | text.str.startswith("success")
     return status_ok & (probs.sub(float(threshold)).abs() >= float(reliability_margin))
+
+
+def plot_battery_capacity_coverage(results: pd.DataFrame):
+    """Bar chart: detected battery customers with vs. without a capacity estimate.
+
+    Left panel — with/without split (count + %).
+    Right panel — breakdown by estimation method for those that have an estimate.
+    """
+    import matplotlib.pyplot as plt
+
+    cap_col = _pick_column(results.columns, _CAPACITY_CANDIDATES)
+    detected = results.loc[_detected_mask(results)].copy()
+    n_det = len(detected)
+    if n_det == 0:
+        raise ValueError("No detected battery customers")
+
+    if cap_col is not None:
+        cap = pd.to_numeric(detected[cap_col], errors="coerce")
+    else:
+        cap = pd.Series(np.nan, index=detected.index)
+
+    n_with = int(cap.notna().sum())
+    n_without = n_det - n_with
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+
+    # ── Left: with / without estimate ──────────────────────────────────────
+    ax = axes[0]
+    bars = ax.bar(
+        ["With estimate", "No estimate\n(excluded)"],
+        [n_with, n_without],
+        color=[_RED, _BLACK],
+        edgecolor=_BLACK,
+        linewidth=0.9,
+        width=0.5,
+    )
+    for bar, n in zip(bars, [n_with, n_without]):
+        pct = 100.0 * n / n_det if n_det else 0
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + n_det * 0.01,
+            f"{n}\n({pct:.1f}%)",
+            ha="center", va="bottom", fontsize=10,
+        )
+    ax.set_title(
+        f"Capacity estimate coverage\namong detected battery customers (n={n_det})",
+        fontsize=11,
+    )
+    ax.set_ylabel("Customers")
+    ax.set_ylim(0, max(n_with, n_without) * 1.18)
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35, color=_GRID)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    # ── Right: estimation method breakdown for those WITH estimate ──────────
+    ax2 = axes[1]
+    method_col = "capacity_estimation_method"
+    if method_col in detected.columns and n_with > 0:
+        with_est = detected.loc[cap.notna()]
+        method_counts = (
+            with_est[method_col]
+            .fillna("unknown")
+            .astype(str)
+            .value_counts()
+        )
+        colors = [_RED if i == 0 else _BLACK if i % 2 == 1 else _GREY
+                  for i in range(len(method_counts))]
+        bars2 = ax2.barh(
+            method_counts.index[::-1],
+            method_counts.values[::-1],
+            color=colors[::-1],
+            edgecolor=_BLACK,
+            linewidth=0.8,
+        )
+        for bar in bars2:
+            w = bar.get_width()
+            ax2.text(
+                w + n_with * 0.005, bar.get_y() + bar.get_height() / 2,
+                str(int(w)), va="center", ha="left", fontsize=9,
+            )
+        ax2.set_title(
+            f"Estimation method breakdown\n(customers with estimate, n={n_with})",
+            fontsize=11,
+        )
+        ax2.set_xlabel("Customers")
+        ax2.grid(axis="x", linestyle="--", linewidth=0.6, alpha=0.35, color=_GRID)
+        ax2.spines["top"].set_visible(False)
+        ax2.spines["right"].set_visible(False)
+    else:
+        ax2.text(
+            0.5, 0.5,
+            "No estimation method data available",
+            ha="center", va="center", transform=ax2.transAxes,
+            fontsize=10, color="#444444",
+        )
+        ax2.set_axis_off()
+
+    fig.tight_layout()
+    return fig
+
+
+def save_battery_capacity_coverage(results: pd.DataFrame, output_path: Path, dpi: int = 150) -> Path:
+    return _save(plot_battery_capacity_coverage(results), output_path=output_path, dpi=dpi)
 
 
 def plot_battery_capacity_histogram(
@@ -347,80 +451,88 @@ def plot_battery_capacity_boxplot(results: pd.DataFrame):
     )
 
 
-def plot_battery_power_distribution(results: pd.DataFrame):
+def plot_battery_matched_days_distribution(results: pd.DataFrame):
+    """Histogram of n_matched_sunny_days for all customers that ran through analysis."""
     import matplotlib.pyplot as plt
 
-    pwr_col = _pick_column(results.columns, _POWER_CANDIDATES)
-    if pwr_col is None:
-        raise ValueError("results must include a battery power column")
-    detected = pd.to_numeric(
-        results.loc[_detected_mask(results), pwr_col], errors="coerce"
-    ).dropna()
-    if detected.empty:
-        raise ValueError("No detected customers with power")
+    col = _pick_column(results.columns, _MATCHED_DAYS_CANDIDATES)
+    if col is None:
+        raise ValueError("results must include 'n_matched_sunny_days'")
 
-    bins = max(10, min(40, int(np.sqrt(len(detected)) * 3)))
+    detected = _detected_mask(results)
+    days_det = pd.to_numeric(results.loc[detected, col], errors="coerce").dropna()
+    days_no = pd.to_numeric(results.loc[~detected, col], errors="coerce").dropna()
+
+    all_days = pd.concat([days_det, days_no]).dropna()
+    if all_days.empty:
+        raise ValueError("No n_matched_sunny_days data available")
+
+    bins = np.arange(0, int(all_days.max()) + 2, 1)
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(detected, bins=bins, color=_RED, edgecolor="white", alpha=0.85)
-    ax.axvline(detected.median(), color="white", linestyle="--", linewidth=1.5,
-               label=f"Median: {detected.median():.2f} kW")
-    ax.axvline(detected.mean(), color=_GREY, linestyle=":", linewidth=1.5,
-               label=f"Mean: {detected.mean():.2f} kW")
-    ax.set_title("Estimated battery power distribution — detected customers")
-    ax.set_xlabel("Estimated battery power (kW)")
+    ax.hist(
+        [days_no, days_det],
+        bins=bins,
+        color=[_BLACK, _RED],
+        label=["No battery detected", "Battery detected"],
+        stacked=True,
+        edgecolor="white",
+        linewidth=0.4,
+    )
+    for days, label in [(days_det, "detected"), (days_no, "not detected")]:
+        if not days.empty:
+            ax.axvline(days.mean(), linestyle="--", linewidth=1.2,
+                       color=_RED if label == "detected" else _GREY,
+                       label=f"Mean ({label}): {days.mean():.1f}")
+    ax.set_title("Matched sunny days distribution")
+    ax.set_xlabel("Number of matched sunny days")
     ax.set_ylabel("Customers")
     ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.25)
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.3, color=_GRID)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     fig.tight_layout()
     return fig
 
 
-def plot_battery_power_boxplot(results: pd.DataFrame):
-    pwr_col = _pick_column(results.columns, _POWER_CANDIDATES)
-    if pwr_col is None:
-        raise ValueError("results must include a battery power column")
-    detected = results.loc[_detected_mask(results)].copy()
-    detected["_pwr"] = pd.to_numeric(detected[pwr_col], errors="coerce")
-    detected = detected.dropna(subset=["_pwr"])
-    if detected.empty:
-        raise ValueError("No detected customers with power")
-    pv = _is_pv_customer(detected)
-    return _grouped_boxplot(
-        [
-            ("PV customers", detected.loc[pv, "_pwr"].values, _RED),
-            ("Non-PV customers", detected.loc[~pv, "_pwr"].values, _GREY),
-            ("All detected", detected["_pwr"].values, _BLACK),
-        ],
-        title="Battery power distribution — detected customers",
-        ylabel="Estimated battery power (kW)",
-    )
-
-
-def plot_battery_capacity_vs_power_scatter(results: pd.DataFrame):
+def plot_battery_dark_days_distribution(results: pd.DataFrame):
+    """Histogram of n_dark_days (reference baseline days) across all analysed customers."""
     import matplotlib.pyplot as plt
 
-    cap_col = _pick_column(results.columns, _CAPACITY_CANDIDATES)
-    pwr_col = _pick_column(results.columns, _POWER_CANDIDATES)
-    if cap_col is None or pwr_col is None:
-        raise ValueError("results must include capacity and power columns")
-    detected = results.loc[_detected_mask(results)].copy()
-    detected["_cap"] = pd.to_numeric(detected[cap_col], errors="coerce")
-    detected["_pwr"] = pd.to_numeric(detected[pwr_col], errors="coerce")
-    detected = detected.dropna(subset=["_cap", "_pwr"])
-    if detected.empty:
-        raise ValueError("No detected customers with capacity and power")
-    pv = _is_pv_customer(detected)
+    col = _pick_column(results.columns, _DARK_DAYS_CANDIDATES)
+    if col is None:
+        raise ValueError("results must include 'n_dark_days'")
 
-    fig, ax = plt.subplots(figsize=(9, 6))
-    ax.scatter(detected.loc[pv, "_cap"], detected.loc[pv, "_pwr"],
-               color=_RED, alpha=0.65, s=40, label=f"PV customers (n={pv.sum()})")
-    ax.scatter(detected.loc[~pv, "_cap"], detected.loc[~pv, "_pwr"],
-               color=_GREY, alpha=0.65, s=40, label=f"Non-PV customers (n={(~pv).sum()})")
-    ax.set_title("Battery capacity vs. estimated power — detected customers")
-    ax.set_xlabel("Estimated battery capacity (kWh)")
-    ax.set_ylabel("Estimated battery power (kW)")
+    detected = _detected_mask(results)
+    days_det = pd.to_numeric(results.loc[detected, col], errors="coerce").dropna()
+    days_no = pd.to_numeric(results.loc[~detected, col], errors="coerce").dropna()
+
+    all_days = pd.concat([days_det, days_no]).dropna()
+    if all_days.empty:
+        raise ValueError("No n_dark_days data available")
+
+    bins = np.arange(0, int(all_days.max()) + 2, max(1, int(all_days.max() / 40)))
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.hist(
+        [days_no, days_det],
+        bins=bins,
+        color=[_BLACK, _RED],
+        label=["No battery detected", "Battery detected"],
+        stacked=True,
+        edgecolor="white",
+        linewidth=0.4,
+    )
+    for days, label in [(days_det, "detected"), (days_no, "not detected")]:
+        if not days.empty:
+            ax.axvline(days.mean(), linestyle="--", linewidth=1.2,
+                       color=_RED if label == "detected" else _GREY,
+                       label=f"Mean ({label}): {days.mean():.1f}")
+    ax.set_title("Dark (reference) days distribution")
+    ax.set_xlabel("Number of dark reference days")
+    ax.set_ylabel("Customers")
     ax.legend()
-    ax.grid(linestyle="--", alpha=0.25)
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.3, color=_GRID)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     fig.tight_layout()
     return fig
 
@@ -461,9 +573,11 @@ def battery_portfolio_summary(
     probs_pct = _prob_pct(results)
 
     cap_col = _pick_column(results.columns, _CAPACITY_CANDIDATES)
-    pwr_col = _pick_column(results.columns, _POWER_CANDIDATES)
+    matched_col = _pick_column(results.columns, _MATCHED_DAYS_CANDIDATES)
+    dark_col = _pick_column(results.columns, _DARK_DAYS_CANDIDATES)
     cap_series = pd.to_numeric(results.loc[detected, cap_col], errors="coerce").dropna() if cap_col else pd.Series(dtype=float)
-    pwr_series = pd.to_numeric(results.loc[detected, pwr_col], errors="coerce").dropna() if pwr_col else pd.Series(dtype=float)
+    matched_series = pd.to_numeric(results[matched_col], errors="coerce").dropna() if matched_col else pd.Series(dtype=float)
+    dark_series = pd.to_numeric(results[dark_col], errors="coerce").dropna() if dark_col else pd.Series(dtype=float)
 
     n_total = int(len(results))
     n_pv = int(pv.sum())
@@ -499,10 +613,10 @@ def battery_portfolio_summary(
             ("median_detected_capacity_kwh", _q(cap_series, 0.5)),
             ("p25_detected_capacity_kwh", _q(cap_series, 0.25)),
             ("p75_detected_capacity_kwh", _q(cap_series, 0.75)),
-            ("avg_detected_power_kw", _q(pwr_series, 0.5) if pwr_series.empty else round(float(pwr_series.mean()), 3)),
-            ("median_detected_power_kw", _q(pwr_series, 0.5)),
-            ("p25_detected_power_kw", _q(pwr_series, 0.25)),
-            ("p75_detected_power_kw", _q(pwr_series, 0.75)),
+            ("avg_matched_sunny_days", round(float(matched_series.mean()), 1) if not matched_series.empty else np.nan),
+            ("median_matched_sunny_days", round(float(matched_series.median()), 1) if not matched_series.empty else np.nan),
+            ("avg_dark_reference_days", round(float(dark_series.mean()), 1) if not dark_series.empty else np.nan),
+            ("median_dark_reference_days", round(float(dark_series.median()), 1) if not dark_series.empty else np.nan),
         ],
         columns=["metric", "value"],
     )
@@ -589,16 +703,12 @@ def save_battery_capacity_boxplot(results: pd.DataFrame, output_path: Path, dpi:
     return _save(plot_battery_capacity_boxplot(results), output_path=output_path, dpi=dpi)
 
 
-def save_battery_power_distribution(results: pd.DataFrame, output_path: Path, dpi: int = 150) -> Path:
-    return _save(plot_battery_power_distribution(results), output_path=output_path, dpi=dpi)
+def save_battery_matched_days_distribution(results: pd.DataFrame, output_path: Path, dpi: int = 150) -> Path:
+    return _save(plot_battery_matched_days_distribution(results), output_path=output_path, dpi=dpi)
 
 
-def save_battery_power_boxplot(results: pd.DataFrame, output_path: Path, dpi: int = 150) -> Path:
-    return _save(plot_battery_power_boxplot(results), output_path=output_path, dpi=dpi)
-
-
-def save_battery_capacity_vs_power_scatter(results: pd.DataFrame, output_path: Path, dpi: int = 150) -> Path:
-    return _save(plot_battery_capacity_vs_power_scatter(results), output_path=output_path, dpi=dpi)
+def save_battery_dark_days_distribution(results: pd.DataFrame, output_path: Path, dpi: int = 150) -> Path:
+    return _save(plot_battery_dark_days_distribution(results), output_path=output_path, dpi=dpi)
 
 
 def save_pv_vs_battery_capacity_scatter(results: pd.DataFrame, output_path: Path, dpi: int = 150) -> Path:

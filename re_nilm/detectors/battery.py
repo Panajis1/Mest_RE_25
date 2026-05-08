@@ -21,25 +21,42 @@ class BatteryDetector(AbstractDetector):
     The detector is passed the pv_result dict in context['pv_result'].
 
     Scoring uses a logistic sigmoid over five signals: peak_shift, gap_ratio,
-    injection_bonus, consistency, and shift_ratio. Parameters reflect migrated
-    battery v7 defaults.
+    injection_bonus, consistency, and shift_ratio. The raw probability is then
+    multiplied by two physical guardrail scalers:
+      - security_scaler (0.4): applied when avg_gap_kwh is outside [2, 30] kWh.
+      - phys_scaler (0.7): applied when avg_gap_kwh exceeds 1.5× the mean
+        evening PV potential of matched sunny days.
 
     Args:
-        classification_threshold: Minimum battery_prob to call has_battery=True.
-        enforce_pv_required: If True, skip customers with has_pv=False.
-        dark_day_rad_max_w: Max peak W/m² for a day to count as 'dark'.
-        sunny_day_rad_min_w: Min peak W/m² for a day to count as 'sunny'.
+        classification_threshold: Minimum prob_battery to call has_battery=True.
+            Default 0.5.
+        enforce_pv_required: If True, skip customers with has_pv=False. Default True.
+        dark_day_rad_max_w: Max peak W/m² for a day to count as 'dark'. Default 100.
+        sunny_day_rad_min_w: Min peak W/m² for a day to count as 'sunny'. Default 100.
         temp_buffer_c: Temperature matching tolerance when pairing dark/sunny days.
-        sigmoid_intercept: Sigmoid bias term (more negative = stricter). Tuned to -3.0.
+            Default 2.0 °C.
+        sigmoid_intercept: Sigmoid bias term (more negative = stricter). Default -2.5.
         strict_min_matched_sunny_days: If fewer matched sunny days are found, apply a
-            z-score penalty of `low_matched_days_z_penalty`. Tuned to 7.
+            z-score penalty of `low_matched_days_z_penalty`. Default 7.
         low_matched_days_z_penalty: Penalty subtracted from z when matched days are
-            below `strict_min_matched_sunny_days`. Tuned to 0.5.
-        nominal_capacity_discharge_fraction: Assumed fraction of battery discharged per
-            evening event, used to scale shift energy → capacity estimate. Tuned to 0.25.
-        pv_anchor_kwh_per_kwp: kWh/kWp used for the PV-size capacity anchor. Tuned to 1.5.
-        pv_anchor_blend_weight: Blend weight for the PV anchor in capacity estimation.
-            Tuned to 0.55.
+            below `strict_min_matched_sunny_days`. Default 0.5.
+        nominal_capacity_discharge_fraction: Assumed depth of discharge per evening
+            event, used to scale shift energy to capacity estimate. Default 0.40,
+            reflecting typical daily cycling of residential batteries.
+        pv_anchor_kwh_per_kwp: kWh capacity per kWp PV for the capacity anchor.
+            Default 1.0, corresponding to the Swiss 1:1 rule of thumb.
+        pv_anchor_blend_weight: Blend weight of the anchor in the final capacity
+            estimate (0 = shift-only, 1 = anchor-only). Default 0.55.
+        consumption_anchor_kwh_per_annual_kwh: Scales annual consumption to a capacity
+            estimate (default 0.001 = 1 kWh per 1 000 kWh annual usage). The effective
+            anchor is max(pv_anchor, consumption_anchor), so PV size is the floor and
+            consumption raises it for larger households.
+        min_dark_reference_days: Minimum number of dark reference days required to run
+            analysis. Customers with fewer dark days are rejected as "No Baseline".
+            Default 2.
+        min_sunny_match_days: Minimum number of sunny days required (both before and
+            after temperature-bin matching). Customers with fewer are rejected.
+            Default 2.
     """
 
     def __init__(
@@ -49,12 +66,15 @@ class BatteryDetector(AbstractDetector):
         dark_day_rad_max_w: float = 100.0,
         sunny_day_rad_min_w: float = 100.0,
         temp_buffer_c: float = 2.0,
-        sigmoid_intercept: float = -3.0,
+        sigmoid_intercept: float = -2.5,
         strict_min_matched_sunny_days: int = 7,
         low_matched_days_z_penalty: float = 0.5,
-        nominal_capacity_discharge_fraction: float = 0.25,
-        pv_anchor_kwh_per_kwp: float = 1.5,
+        nominal_capacity_discharge_fraction: float = 0.40,
+        pv_anchor_kwh_per_kwp: float = 1.0,
         pv_anchor_blend_weight: float = 0.55,
+        consumption_anchor_kwh_per_annual_kwh: float = 0.001,
+        min_dark_reference_days: int = 2,
+        min_sunny_match_days: int = 2,
     ):
         self.classification_threshold = classification_threshold
         self.enforce_pv_required = enforce_pv_required
@@ -67,6 +87,9 @@ class BatteryDetector(AbstractDetector):
         self.nominal_capacity_discharge_fraction = nominal_capacity_discharge_fraction
         self.pv_anchor_kwh_per_kwp = pv_anchor_kwh_per_kwp
         self.pv_anchor_blend_weight = pv_anchor_blend_weight
+        self.consumption_anchor_kwh_per_annual_kwh = consumption_anchor_kwh_per_annual_kwh
+        self.min_dark_reference_days = min_dark_reference_days
+        self.min_sunny_match_days = min_sunny_match_days
         # Cache the indexed weather frame so it's not rebuilt per customer.
         # Keyed by id(weather_df); cache lifetime matches this detector instance.
         self._weather_indexed_cache: dict = {}
@@ -132,6 +155,9 @@ class BatteryDetector(AbstractDetector):
                 nominal_capacity_discharge_fraction=self.nominal_capacity_discharge_fraction,
                 pv_anchor_kwh_per_kwp=self.pv_anchor_kwh_per_kwp,
                 pv_anchor_blend_weight=self.pv_anchor_blend_weight,
+                consumption_anchor_kwh_per_annual_kwh=self.consumption_anchor_kwh_per_annual_kwh,
+                min_dark_reference_days=self.min_dark_reference_days,
+                min_sunny_match_days=self.min_sunny_match_days,
             )
         except Exception as exc:
             logger.warning("battery detection failed for customer %s: %s", customer_id, exc)
