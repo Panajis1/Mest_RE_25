@@ -143,9 +143,10 @@ class ACDisaggregationEstimator(AbstractEstimator):
         feature_cols: Feature column names from training (loaded from JSON sidecar).
     """
 
-    def __init__(self, model, feature_cols: Optional[List[str]] = None):
+    def __init__(self, model, feature_cols: Optional[List[str]] = None, disagg_scale_factor: float = 1.0):
         self.model = model
         self.feature_cols = feature_cols
+        self.disagg_scale_factor = float(disagg_scale_factor)
         # Cache the dt-normalised + sorted weather frame so it isn't rebuilt
         # per customer. Keyed by id(weather_df); cache lifetime matches this
         # estimator instance (one cache entry per unique weather DF identity).
@@ -277,12 +278,12 @@ class ACDisaggregationEstimator(AbstractEstimator):
         except Exception as exc:
             return {"customer_id": customer_id, "error": str(exc)}
 
-        ac_kw_pred = pred_df["ac_kw_pred"].to_numpy()
+        ac_kw_pred = pred_df["ac_kw_pred"].to_numpy() * self.disagg_scale_factor
 
         out_df = pd.DataFrame({
             "dt_utc": feat_df["dt_utc"].values,
             "customer_id": customer_id,
-            "ac_kw_pred": pred_df["ac_kw_pred"].values.clip(min=0),
+            "ac_kw_pred": ac_kw_pred.clip(min=0),
             "ac_on_prob": pred_df["ac_on_prob"].values,
         })
 
