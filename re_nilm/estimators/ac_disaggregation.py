@@ -114,8 +114,6 @@ def _joblib_load_compat(path: Path):
     _added_loss = "_loss" not in sys.modules
     sys.modules.setdefault("_loss", _sk_loss_ext)
 
-
-
     try:
         return joblib.load(path)
     finally:
@@ -125,10 +123,6 @@ def _joblib_load_compat(path: Path):
         _np_pickle.__generator_ctor = _orig_gen_ctor
         if _added_loss:
             sys.modules.pop("_loss", None)
-        if _added_legacy_path and _legacy_model_dir in sys.path:
-            sys.path.remove(_legacy_model_dir)
-        for _ctor_name in _added_cy_ctors:
-            _sk_loss_ext.__dict__.pop(_ctor_name, None)
 
 
 class ACDisaggregationEstimator(AbstractEstimator):
@@ -143,7 +137,7 @@ class ACDisaggregationEstimator(AbstractEstimator):
         feature_cols: Feature column names from training (loaded from JSON sidecar).
     """
 
-    def __init__(self, model, feature_cols: Optional[List[str]] = None, disagg_scale_factor: float = 1.0):
+    def __init__(self, model, feature_cols: Optional[List[str]] = None, disagg_scale_factor: float = 0.3):
         self.model = model
         self.feature_cols = feature_cols
         self.disagg_scale_factor = float(disagg_scale_factor)

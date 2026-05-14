@@ -25,7 +25,7 @@ class BatteryDetector(AbstractDetector):
     multiplied by two physical guardrail scalers:
       - security_scaler (0.4): applied when avg_gap_kwh is outside [2, 30] kWh.
       - phys_scaler (0.7): applied when avg_gap_kwh exceeds 1.5× the mean
-        evening PV potential of matched sunny days.
+        full-day PV potential of matched sunny days (charges bounded by daily generation).
 
     Args:
         classification_threshold: Minimum prob_battery to call has_battery=True.
@@ -177,4 +177,6 @@ class BatteryDetector(AbstractDetector):
             "has_battery": has_battery,
             "prob_battery": prob,
             "battery_status": result.get("status", "ok"),
+            "n_matched_sunny_days": result.get("n_matched_sunny_days", 0),
+            "n_dark_days": result.get("n_dark_days", 0),
         }

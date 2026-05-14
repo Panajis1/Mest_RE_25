@@ -13,7 +13,7 @@ Signal weights (z-score):
 
 Guardrails (applied after sigmoid):
   security_scaler: 0.4 if avg_gap_kwh outside [2, 30] kWh, else 1.0
-  phys_scaler:     0.7 if avg_gap_kwh > 1.5 × mean evening PV potential, else 1.0
+  phys_scaler:     0.7 if avg_gap_kwh > 1.5 × full-day PV potential of sunny days, else 1.0
 
 Key output fields (always present, 0 for early-rejected customers):
   n_matched_sunny_days: sunny days that could be paired with a dark-day temperature bin
@@ -71,8 +71,8 @@ SIGMOID_CLIP_MAX = 20
 SECURITY_MIN_GAP_KWH = 2.0          # gaps below 2 kWh or above 30 kWh get 0.4 scaler
 SECURITY_MAX_GAP_KWH = 30.0
 SECURITY_OUTSIDE_SCALER = 0.4
-PHYSICAL_GAP_FACTOR = 1.5           # gap > 1.5 × mean evening PV potential gets 0.7 scaler
-PHYSICAL_OUTSIDE_SCALER = 0.7       # (compares against evening window only, not full day)
+PHYSICAL_GAP_FACTOR = 1.5           # gap > 1.5 × full-day PV potential of matched sunny days gets scaler
+PHYSICAL_OUTSIDE_SCALER = 0.7       # scaler applied when gap exceeds the physical plausibility threshold
 
 # --- Shift blending (when added self-consumption signal is present) ---
 SHIFT_BLEND_GAP_WEIGHT = 0.60
@@ -433,10 +433,9 @@ def analyze_battery_residential_v7(
             if SECURITY_MIN_GAP_KWH <= avg_gap_kwh <= SECURITY_MAX_GAP_KWH
             else SECURITY_OUTSIDE_SCALER
         )
-        evening_pot_high = float(sunny_matched["pv_potential_kwh"].mean()) if len(sunny_matched) > 0 else np.nan
         phys_scaler = (
             1.0
-            if pd.isna(evening_pot_high) or evening_pot_high <= 0 or avg_gap_kwh <= (evening_pot_high * PHYSICAL_GAP_FACTOR)
+            if pot_high <= 0 or avg_gap_kwh <= (pot_high * PHYSICAL_GAP_FACTOR)
             else PHYSICAL_OUTSIDE_SCALER
         )
 
