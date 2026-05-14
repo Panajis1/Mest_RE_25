@@ -1,4 +1,4 @@
-"""Export portfolio result figures from the pipeline output to docs/figures/.
+"""Export portfolio result figures from the pipeline output to figures/results/.
 
 Reads the joined results parquet produced by run_pipeline.py and generates
 summary visualisations (population statistics, capacity vs. production).
@@ -10,21 +10,21 @@ Prerequisites:
       Run ``run_pipeline.py`` first if these files are missing.
 
 Output:
-    docs/figures/results/appliance_adoption_shares.png
-    docs/figures/results/pv_installed_capacity_summary.png
-    docs/figures/results/pv_capacity_distribution.png
-    docs/figures/results/pv_detection_summary.png         # 3-panel matplotlib PNG
-    docs/figures/results/ac_probability_distribution.png
-    docs/figures/results/hp_probability_distribution.png
-    docs/figures/results/battery_probability_distribution.png
-    docs/figures/results/battery_capacity_histogram.png
-    docs/figures/results/battery_reliability_summary.png
-    docs/figures/results/battery_probability_distribution_matplotlib.png
-    docs/figures/results/hp_customer_mix_pie.png
-    docs/figures/results/hp_annual_consumption_pdf.png
-    docs/figures/results/ev_probability_distribution_hist.png
-    docs/figures/results/technology_portfolio_summaries.png
-    docs/figures/results/pv_population_statistics.png
+    figures/results/appliance_adoption_shares.png
+    figures/results/pv_installed_capacity_summary.png
+    figures/results/pv_capacity_distribution.png
+    figures/results/pv_detection_summary.png         # 3-panel matplotlib PNG
+    figures/results/ac_probability_distribution.png
+    figures/results/hp_probability_distribution.png
+    figures/results/battery_probability_distribution.png
+    figures/results/battery_capacity_histogram.png
+    figures/results/battery_reliability_summary.png
+    figures/results/battery_probability_distribution_matplotlib.png
+    figures/results/hp_customer_mix_pie.png
+    figures/results/hp_annual_consumption_pdf.png
+    figures/results/ev_probability_distribution_hist.png
+    figures/results/technology_portfolio_summaries.png
+    figures/results/pv_population_statistics.png
 
 Usage:
     python scripts/export_figures.py --config config/re_production.yaml
@@ -93,7 +93,7 @@ def main():
 
     cfg = load_config(args.config)
     results_dir = Path(cfg.get("output", {}).get("results_dir", "data/processed/out"))
-    figures_dir = Path(cfg.get("output", {}).get("figures_dir", "docs/figures/results"))
+    figures_dir = Path(cfg.get("output", {}).get("figures_dir", "figures/results"))
 
     results_path = results_dir / "results_all_customers.parquet"
     if not results_path.exists():

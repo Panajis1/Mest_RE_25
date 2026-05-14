@@ -1,8 +1,7 @@
 """AC disaggregation trainer — fits AcTwoStageModel from labeled TOT+AC time series.
 
-Mirrors the legacy training in `old_files/model/ac_disaggregation.py` but lives
-inside the re_nilm package so it can be invoked from `scripts/train_models.py`
-without sys.path tricks. Saves both the model and a feature_cols JSON sidecar.
+Invoked from `scripts/train_models.py`. Saves both the model and a feature_cols
+JSON sidecar.
 """
 
 from __future__ import annotations

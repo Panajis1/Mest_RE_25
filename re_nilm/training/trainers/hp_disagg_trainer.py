@@ -1,10 +1,7 @@
 """HP disaggregation trainer — fits ScientificTwoStageHPModel from labeled TOT+HP time series.
 
-Mirrors the legacy training in `old_files/hp_model/disaggregation_functions.py`
-but lives inside the re_nilm package so it can be invoked from
-`scripts/train_models.py` without sys.path tricks. Trains only on customers
-labeled `winter_hp` (per legacy behaviour) and saves feature_cols on the model
-object as well as a JSON sidecar.
+Invoked from `scripts/train_models.py`. Trains only on customers labeled
+`winter_hp` and saves feature_cols on the model object as well as a JSON sidecar.
 """
 
 from __future__ import annotations
