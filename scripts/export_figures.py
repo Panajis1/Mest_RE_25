@@ -14,21 +14,17 @@ Output:
     docs/figures/results/pv_installed_capacity_summary.png
     docs/figures/results/pv_capacity_distribution.png
     docs/figures/results/pv_detection_summary.png         # 3-panel matplotlib PNG
-    docs/figures/results/pv_probability_distribution.png
     docs/figures/results/ac_probability_distribution.png
     docs/figures/results/hp_probability_distribution.png
     docs/figures/results/battery_probability_distribution.png
-    docs/figures/results/ev_probability_distribution.png
     docs/figures/results/battery_capacity_histogram.png
     docs/figures/results/battery_reliability_summary.png
     docs/figures/results/battery_probability_distribution_matplotlib.png
     docs/figures/results/hp_customer_mix_pie.png
     docs/figures/results/hp_annual_consumption_pdf.png
     docs/figures/results/ev_probability_distribution_hist.png
-    docs/figures/results/appliance_cooccurrence_heatmap.png
     docs/figures/results/technology_portfolio_summaries.png
     docs/figures/results/pv_population_statistics.png
-    docs/figures/results/pv_capacity_vs_production.png
 
 Usage:
     python scripts/export_figures.py --config config/re_production.yaml
@@ -48,9 +44,7 @@ if str(_REPO_ROOT) not in sys.path:
 from re_nilm.pipeline.orchestrator import load_config
 from re_nilm.visualization.portfolio import (
     plot_appliance_adoption_shares,
-    plot_appliance_cooccurrence_heatmap,
     plot_appliance_probability_distribution,
-    plot_capacity_vs_production_with_ci,
     plot_population_statistics,
     plot_pv_capacity_distribution,
     plot_pv_installed_capacity_summary,
@@ -98,6 +92,12 @@ def main():
     )
     logger = logging.getLogger("export_figures")
 
+    # Use a white plot/paper background for every Plotly figure produced by
+    # this script. Default Plotly template ("plotly") renders a light blue
+    # grid that doesn't match the rest of the brand palette.
+    import plotly.io as pio
+    pio.templates.default = "plotly_white"
+
     cfg = load_config(args.config)
     results_dir = Path(cfg.get("output", {}).get("results_dir", "data/processed/out"))
     figures_dir = Path(cfg.get("output", {}).get("figures_dir", "docs/figures/results"))
@@ -133,7 +133,6 @@ def main():
 
     for name, plotter in [
         ("appliance_adoption_shares", plot_appliance_adoption_shares),
-        ("appliance_cooccurrence_heatmap", plot_appliance_cooccurrence_heatmap),
         ("technology_portfolio_summaries", plot_technology_portfolio_summaries),
     ]:
         try:
@@ -142,11 +141,9 @@ def main():
             logger.warning("%s failed: %s", name, exc)
 
     for appliance, stem in [
-        ("pv", "pv_probability_distribution"),
         ("ac", "ac_probability_distribution"),
         ("hp", "hp_probability_distribution"),
         ("battery", "battery_probability_distribution"),
-        ("ev", "ev_probability_distribution"),
     ]:
         try:
             figures.append((stem, plot_appliance_probability_distribution(results, appliance=appliance)))
@@ -172,14 +169,6 @@ def main():
         except Exception as exc:
             logger.warning("plot_population_statistics failed: %s", exc)
 
-        try:
-            pv_ind_path = results_dir / "pv_indicators.parquet"
-            if pv_ind_path.exists():
-                pv_ind = pd.read_parquet(pv_ind_path)
-                fig = plot_capacity_vs_production_with_ci(results.merge(pv_ind, on="customer_id", how="left"))
-                figures.append(("pv_capacity_vs_production", fig))
-        except Exception as exc:
-            logger.warning("plot_capacity_vs_production_with_ci failed: %s", exc)
 
     if not figures:
         logger.warning("No figures generated — check that results contain appliance result columns")

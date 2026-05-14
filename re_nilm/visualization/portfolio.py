@@ -373,6 +373,7 @@ def plot_appliance_probability_distribution(
         go.Histogram(
             x=probs,
             nbinsx=30,
+            marker=dict(color=_RED, line=dict(color=_BLACK, width=0.5)),
             hovertemplate="Probability: %{x:.2f}<br>Customers: %{y}<extra></extra>",
         )
     )
