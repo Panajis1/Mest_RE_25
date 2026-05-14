@@ -128,8 +128,14 @@ def plot_population_statistics(
     if not cols:
         return go.Figure()
     fig = make_subplots(rows=1, cols=len(cols), subplot_titles=cols)
+    # Cap pv_capacity_kwp x-axis at 90 kWp; rare commercial outliers (>1 MWp)
+    # otherwise squash the residential distribution into a single bin.
+    x_ranges = {"pv_capacity_kwp": (0, 90)}
     for i, c in enumerate(cols, start=1):
         vals = pd.to_numeric(df[c], errors="coerce").dropna()
+        xr = x_ranges.get(c)
+        if xr is not None:
+            vals = vals.clip(upper=xr[1])
         fig.add_trace(
             go.Histogram(
                 x=vals,
@@ -140,6 +146,8 @@ def plot_population_statistics(
             row=1,
             col=i,
         )
+        if xr is not None:
+            fig.update_xaxes(range=xr, row=1, col=i)
     fig.update_layout(title=title, showlegend=False)
     return fig
 
