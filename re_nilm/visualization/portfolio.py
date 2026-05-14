@@ -125,6 +125,7 @@ def plot_appliance_adoption_shares(
     fig = go.Figure(go.Bar(
         x=df["appliance"],
         y=df["share_pct"],
+        marker_color=_RED,
         error_y=dict(
             type="data",
             symmetric=False,
@@ -448,6 +449,7 @@ def plot_technology_portfolio_summaries(
                 x=hp_counts.index,
                 y=hp_counts.values,
                 name="HP type",
+                marker_color=_RED,
                 showlegend=False,
                 hovertemplate="%{x}: %{y:,} customers<extra></extra>",
             ),
@@ -465,6 +467,7 @@ def plot_technology_portfolio_summaries(
                     x=batt,
                     nbinsx=30,
                     name="Battery capacity",
+                    marker_color=_RED,
                     showlegend=False,
                     hovertemplate="Capacity: %{x:.1f} kWh<br>Customers: %{y}<extra></extra>",
                 ),
@@ -482,6 +485,7 @@ def plot_technology_portfolio_summaries(
                     x=ev,
                     nbinsx=30,
                     name="EV annual energy",
+                    marker_color=_RED,
                     showlegend=False,
                     hovertemplate="Energy: %{x:.2f} MWh/year<br>Customers: %{y}<extra></extra>",
                 ),

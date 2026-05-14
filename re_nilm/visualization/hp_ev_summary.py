@@ -7,10 +7,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-_RED = "#ff5258"
-_BLACK = "#101010"
-_GRAY = "#9b9b9b"
-_BLUE = "#2d6ea3"
+_RED = "#c9252b"
+_BLACK = "#111111"
+_GRAY = "#888888"
 
 
 def _bool_series(series: pd.Series) -> pd.Series:
@@ -86,10 +85,10 @@ def plot_hp_annual_consumption_pdf(
         raise ValueError("No positive annual HP consumption values available")
 
     fig, ax = plt.subplots(figsize=(8.5, 5))
-    values.plot.kde(ax=ax, color=_BLUE, linewidth=1.4)
+    values.plot.kde(ax=ax, color=_RED, linewidth=1.4)
     x = ax.lines[-1].get_xdata()
     y = ax.lines[-1].get_ydata()
-    ax.fill_between(x, y, color=_BLUE, alpha=0.25)
+    ax.fill_between(x, y, color=_RED, alpha=0.25)
     ax.set_title(title, fontsize=13)
     ax.set_xlabel("Annual HP consumption (kWh)")
     ax.set_ylabel("Probability density")
@@ -114,7 +113,7 @@ def plot_ev_probability_histogram(
         raise ValueError("No EV probability values available")
 
     fig, ax = plt.subplots(figsize=(8.8, 5.2))
-    ax.hist(probs, bins=np.linspace(0, 1, 31), color=_BLUE, edgecolor="white", linewidth=0.6)
+    ax.hist(probs, bins=np.linspace(0, 1, 31), color=_RED, edgecolor="white", linewidth=0.6)
     ax.set_title(title, fontsize=13)
     ax.set_xlabel("EV probability")
     ax.set_ylabel("Number of customers")

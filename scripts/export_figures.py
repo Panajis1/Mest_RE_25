@@ -56,18 +56,11 @@ from re_nilm.visualization.pv_summary import (
     save_pv_detection_summary,
 )
 from re_nilm.visualization.battery_summary import (
-    save_battery_capacity_boxplot,
     save_battery_capacity_coverage,
     save_battery_capacity_histogram,
-    save_battery_dark_days_distribution,
     save_battery_detected_share_pie,
-    save_battery_matched_days_distribution,
     save_battery_portfolio_summary_tables,
     save_battery_probability_distribution,
-    save_battery_pv_split_pie,
-    save_battery_reliability_summary,
-    save_battery_status_breakdown,
-    save_pv_vs_battery_capacity_scatter,
 )
 from re_nilm.visualization.hp_ev_summary import (
     save_ev_probability_histogram,
@@ -143,7 +136,6 @@ def main():
     for appliance, stem in [
         ("ac", "ac_probability_distribution"),
         ("hp", "hp_probability_distribution"),
-        ("battery", "battery_probability_distribution"),
     ]:
         try:
             figures.append((stem, plot_appliance_probability_distribution(results, appliance=appliance)))
@@ -213,35 +205,18 @@ def main():
             logger.warning("battery_capacity_histogram failed: %s", exc)
 
         try:
-            out = save_battery_reliability_summary(
-                results,
-                figures_dir / "battery_reliability_summary.png",
-                threshold=threshold,
-                reliability_margin=reliability_margin,
-            )
-            logger.info("Battery reliability summary written → %s", out)
-        except Exception as exc:
-            logger.warning("battery_reliability_summary failed: %s", exc)
-
-        try:
             out = save_battery_probability_distribution(
                 results,
-                figures_dir / "battery_probability_distribution_matplotlib.png",
+                figures_dir / "battery_probability_distribution.png",
                 threshold=threshold,
             )
             logger.info("Battery probability distribution written → %s", out)
         except Exception as exc:
-            logger.warning("battery_probability_distribution_matplotlib failed: %s", exc)
+            logger.warning("battery_probability_distribution failed: %s", exc)
 
         for stem, fn, kw in [
             ("battery_detected_share_pie", save_battery_detected_share_pie, {"threshold": threshold}),
-            ("battery_status_breakdown", save_battery_status_breakdown, {}),
-            ("battery_pv_split_pie", save_battery_pv_split_pie, {}),
-            ("battery_capacity_boxplot", save_battery_capacity_boxplot, {}),
             ("battery_capacity_coverage", save_battery_capacity_coverage, {}),
-            ("battery_matched_days_distribution", save_battery_matched_days_distribution, {}),
-            ("battery_dark_days_distribution", save_battery_dark_days_distribution, {}),
-            ("pv_vs_battery_capacity_scatter", save_pv_vs_battery_capacity_scatter, {}),
         ]:
             try:
                 out = fn(results, figures_dir / f"{stem}.png", **kw)
@@ -371,6 +346,15 @@ def _print_stats(results: pd.DataFrame, results_dir: Path) -> None:
         print(f"\n  AC Detection detail")
         print(f"    Mean prob_ac (all)    : {results['prob_ac'].mean():.3f}")
         print(f"    Mean prob_ac (AC+)   : {results.loc[results['has_ac']==True,'prob_ac'].mean():.3f}")
+
+    # Battery-specific stats
+    if "has_battery" in results.columns and "has_pv" in results.columns:
+        pv_mask = results["has_pv"].astype(bool)
+        n_pv = int(pv_mask.sum())
+        n_pv_batt = int((pv_mask & results["has_battery"].astype(bool)).sum())
+        share_pv_batt = 100.0 * n_pv_batt / n_pv if n_pv else 0.0
+        print(f"\n  Battery Detection detail")
+        print(f"    PV customers with battery : {n_pv_batt:,} / {n_pv:,} ({share_pv_batt:.1f}%)")
 
     # AC disaggregation
     disagg_path = results_dir / "ac_disagg_15min.parquet"

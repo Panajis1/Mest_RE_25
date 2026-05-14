@@ -109,10 +109,7 @@ def plot_battery_capacity_coverage(results: pd.DataFrame):
     n_with = int(cap.notna().sum())
     n_without = n_det - n_with
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
-
-    # ── Left: with / without estimate ──────────────────────────────────────
-    ax = axes[0]
+    fig, ax = plt.subplots(figsize=(7, 5.2))
     bars = ax.bar(
         ["With estimate", "No estimate\n(excluded)"],
         [n_with, n_without],
@@ -138,50 +135,6 @@ def plot_battery_capacity_coverage(results: pd.DataFrame):
     ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35, color=_GRID)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-
-    # ── Right: estimation method breakdown for those WITH estimate ──────────
-    ax2 = axes[1]
-    method_col = "capacity_estimation_method"
-    if method_col in detected.columns and n_with > 0:
-        with_est = detected.loc[cap.notna()]
-        method_counts = (
-            with_est[method_col]
-            .fillna("unknown")
-            .astype(str)
-            .value_counts()
-        )
-        colors = [_RED if i == 0 else _BLACK if i % 2 == 1 else _GREY
-                  for i in range(len(method_counts))]
-        bars2 = ax2.barh(
-            method_counts.index[::-1],
-            method_counts.values[::-1],
-            color=colors[::-1],
-            edgecolor=_BLACK,
-            linewidth=0.8,
-        )
-        for bar in bars2:
-            w = bar.get_width()
-            ax2.text(
-                w + n_with * 0.005, bar.get_y() + bar.get_height() / 2,
-                str(int(w)), va="center", ha="left", fontsize=9,
-            )
-        ax2.set_title(
-            f"Estimation method breakdown\n(customers with estimate, n={n_with})",
-            fontsize=11,
-        )
-        ax2.set_xlabel("Customers")
-        ax2.grid(axis="x", linestyle="--", linewidth=0.6, alpha=0.35, color=_GRID)
-        ax2.spines["top"].set_visible(False)
-        ax2.spines["right"].set_visible(False)
-    else:
-        ax2.text(
-            0.5, 0.5,
-            "No estimation method data available",
-            ha="center", va="center", transform=ax2.transAxes,
-            fontsize=10, color="#444444",
-        )
-        ax2.set_axis_off()
-
     fig.tight_layout()
     return fig
 
@@ -214,6 +167,9 @@ def plot_battery_capacity_histogram(
     else:
         bins = max(12, min(30, int(np.sqrt(len(cap)) * 2)))
         ax.hist(cap, bins=bins, color=_RED, edgecolor=_BLACK, linewidth=1.0)
+        avg = float(cap.mean())
+        ax.axvline(avg, color=_BLACK, linestyle="--", linewidth=1.5, label=f"Mean: {avg:.1f} kWh")
+        ax.legend(loc="upper right")
     ax.set_title(title, fontsize=13)
     ax.set_xlabel("Estimated battery capacity (kWh)")
     ax.set_ylabel("Customers")
@@ -724,11 +680,9 @@ def save_battery_portfolio_summary_tables(
     """Write portfolio summary CSVs. Returns {name: path}."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    summary_df, overview_df = battery_portfolio_summary(
+    summary_df, _ = battery_portfolio_summary(
         results, threshold=threshold, reliability_margin=reliability_margin,
     )
     summary_path = output_dir / "battery_portfolio_summary_table.csv"
-    overview_path = output_dir / "battery_portfolio_overview_table.csv"
     summary_df.to_csv(summary_path, index=False)
-    overview_df.to_csv(overview_path, index=False)
-    return {"summary": summary_path, "overview": overview_path}
+    return {"summary": summary_path}
