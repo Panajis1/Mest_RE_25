@@ -4,6 +4,7 @@
 data:
   re_data_dir: "data/re_data/ETHZ_ALL"
   metadata_dir: "data/re_data/ETHZ_ALL"
+  training_data_path: "data/processed_data/all_sources_load_with_weather.parquet"
 
 pipeline:
   n_workers: 4 #can be set to "auto" to use all available cores
