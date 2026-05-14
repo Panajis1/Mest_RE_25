@@ -63,12 +63,12 @@ from re_nilm.visualization.pv_summary import (
 )
 from re_nilm.visualization.battery_summary import (
     save_battery_capacity_boxplot,
+    save_battery_capacity_coverage,
     save_battery_capacity_histogram,
-    save_battery_capacity_vs_power_scatter,
+    save_battery_dark_days_distribution,
     save_battery_detected_share_pie,
+    save_battery_matched_days_distribution,
     save_battery_portfolio_summary_tables,
-    save_battery_power_boxplot,
-    save_battery_power_distribution,
     save_battery_probability_distribution,
     save_battery_pv_split_pie,
     save_battery_reliability_summary,
@@ -249,9 +249,9 @@ def main():
             ("battery_status_breakdown", save_battery_status_breakdown, {}),
             ("battery_pv_split_pie", save_battery_pv_split_pie, {}),
             ("battery_capacity_boxplot", save_battery_capacity_boxplot, {}),
-            ("battery_power_distribution", save_battery_power_distribution, {}),
-            ("battery_power_boxplot", save_battery_power_boxplot, {}),
-            ("battery_capacity_vs_power_scatter", save_battery_capacity_vs_power_scatter, {}),
+            ("battery_capacity_coverage", save_battery_capacity_coverage, {}),
+            ("battery_matched_days_distribution", save_battery_matched_days_distribution, {}),
+            ("battery_dark_days_distribution", save_battery_dark_days_distribution, {}),
             ("pv_vs_battery_capacity_scatter", save_pv_vs_battery_capacity_scatter, {}),
         ]:
             try:
