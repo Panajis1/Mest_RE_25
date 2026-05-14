@@ -196,23 +196,6 @@ def plot_customer_heatmap(
     return fig
 
 
-def plot_portfolio_aggregate_load(
-    net_consumption: pd.DataFrame,
-    title: str = "Portfolio Net Consumption",
-):
-    _require_plotly()
-    if net_consumption.empty:
-        return go.Figure()
-    x = "dt_utc" if "dt_utc" in net_consumption.columns else net_consumption.columns[0]
-    fig = go.Figure()
-    if "total_pv_kwh" in net_consumption.columns:
-        fig.add_trace(go.Scatter(x=net_consumption[x], y=net_consumption["total_pv_kwh"], mode="lines", name="total_pv_kwh"))
-    if "total_net_consumption_kwh" in net_consumption.columns:
-        fig.add_trace(go.Scatter(x=net_consumption[x], y=net_consumption["total_net_consumption_kwh"], mode="lines", name="total_net_consumption_kwh"))
-    fig.update_layout(title=title, xaxis_title=x, yaxis_title="kWh")
-    return fig
-
-
 def plot_evaluation_dashboard(
     results: pd.DataFrame,
     pv_indicators: pd.DataFrame,

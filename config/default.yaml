@@ -64,10 +64,6 @@ models:
     step_threshold_kwh: 1.5
     min_duration_minutes: 60
 
-forecast:
-  year: 2024
-  min_pv_capacity_kwp: 0.1
-
 output:
   results_dir: "data/processed/out"
   figures_dir: "figures/results"

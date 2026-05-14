@@ -12,7 +12,6 @@ from re_nilm.visualization._pv_plots_v1 import (
     plot_capacity_vs_production_with_ci as _plot_capacity_ci,
     plot_evaluation_dashboard as _plot_dashboard,
     plot_population_statistics as _plot_population_statistics,
-    plot_portfolio_aggregate_load as _plot_aggregate_load,
 )
 
 try:
@@ -92,22 +91,6 @@ def plot_capacity_vs_production_with_ci(
         Plotly Figure.
     """
     return _plot_capacity_ci(results, title=title)
-
-
-def plot_portfolio_aggregate_load(
-    net_consumption: pd.DataFrame,
-    title: str = "Portfolio Net Consumption",
-):
-    """Plot aggregated net consumption time series for the portfolio.
-
-    Args:
-        net_consumption: Output of re_nilm.portfolio.forecasting.build_net_consumption.
-        title: Plot title.
-
-    Returns:
-        Plotly Figure.
-    """
-    return _plot_aggregate_load(net_consumption, title=title)
 
 
 def plot_appliance_adoption_shares(
@@ -273,26 +256,52 @@ def plot_pv_capacity_distribution(
         raise ValueError("No positive PV capacity estimates found")
 
     n_over = int((cap > x_max_kwp).sum())
+    mean_kwp = float(cap.mean())
+    median_kwp = float(cap.median())
+
     fig = go.Figure(go.Histogram(
         x=cap,
         xbins=dict(start=0, end=x_max_kwp, size=2),
         marker=dict(color=_RED, line=dict(color=_BLACK, width=0.5)),
         hovertemplate="Capacity bin: %{x:.1f} kWp<br>Customers: %{y}<extra></extra>",
     ))
+    fig.add_vline(x=mean_kwp, line=dict(color=_BLACK, width=1.5, dash="dash"))
+    fig.add_vline(x=median_kwp, line=dict(color="#555555", width=1.5, dash="dash"))
     fig.update_layout(
         title=title,
         xaxis_title="PV capacity (kWp)",
         yaxis_title="Number of customers",
         xaxis=dict(range=[0, x_max_kwp]),
-        annotations=[dict(
-            text=f"{n_over:,} customers above {x_max_kwp:.0f} kWp" if n_over else f"No customers above {x_max_kwp:.0f} kWp",
-            x=0.98,
-            y=0.95,
-            xref="paper",
-            yref="paper",
-            showarrow=False,
-            xanchor="right",
-        )],
+        template="plotly_white",
+    )
+    fig.add_annotation(
+        text=f"{n_over:,} customers above {x_max_kwp:.0f} kWp" if n_over else f"No customers above {x_max_kwp:.0f} kWp",
+        x=0.98,
+        y=0.95,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        xanchor="right",
+    )
+    fig.add_annotation(
+        text=(
+            f"<span style='color:{_BLACK}'>— — Mean: {mean_kwp:.1f} kWp</span><br>"
+            f"<span style='color:#555555'>— — Median: {median_kwp:.1f} kWp</span>"
+        ),
+        x=mean_kwp,
+        y=1.0,
+        xref="x",
+        yref="paper",
+        showarrow=False,
+        xanchor="left",
+        yanchor="top",
+        xshift=8,
+        align="left",
+        font=dict(size=15),
+        bgcolor="rgba(255,255,255,0.9)",
+        bordercolor=_BLACK,
+        borderwidth=0.8,
+        borderpad=6,
     )
     return fig
 

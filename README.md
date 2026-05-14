@@ -24,7 +24,7 @@ re_nilm/
     customer_index.py     # filtered customer_id -> parquet paths mapping
     streaming.py          # batched checkpointed processing engine
     orchestrator.py       # end-to-end pipeline composition
-  portfolio/              # aggregation, evaluation, forecasting helpers
+  portfolio/              # aggregation and evaluation helpers
   training/               # AC/HP detector + disaggregator trainers
   visualization/          # customer and portfolio plotting utilities
 
@@ -177,8 +177,8 @@ output:
 ```
 
 `config/re_production.yaml` currently overrides the data paths, enables all
-detectors, uses `n_workers: "auto"`, and sets PV capacity bootstrapping to `10`
-for faster iteration.
+detectors, uses `n_workers: 4` (set to `"auto"` to use all cores), and sets
+PV capacity bootstrapping to `20` for faster iteration.
 
 ## Pipeline Workflow
 
@@ -482,7 +482,7 @@ python -m pytest tests/integration/ -v -m integration
 3. Training AC/HP models when labelled data is present.
 4. Running a small direct portfolio sample.
 5. Running or loading the full orchestrator output.
-6. Generating portfolio summaries and PV forecast examples.
+6. Generating portfolio summaries.
 7. Mapping notebook cells to the equivalent CLI commands.
 
 Keep `RUN_FULL_PIPELINE = False` unless you intentionally want to launch a full

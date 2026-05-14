@@ -70,4 +70,9 @@ hp_model/hp_detection_outputs/
 models/ac_cache/
 models/ac_detection_outputs/
 
+# Slides (generated hand-in PowerPoint)
+slides/
+*.pptx
+scripts/make_handin_slide.py
+
 CLAUDE.md
