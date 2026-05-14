@@ -132,6 +132,7 @@ def plot_appliance_adoption_shares(
             array=df["ci_high_pct"] - df["share_pct"],
             arrayminus=df["share_pct"] - df["ci_low_pct"],
             thickness=1.5,
+            color=_BLACK,
         ),
         customdata=df[["positive", "n", "ci_low_pct", "ci_high_pct"]],
         hovertemplate=(
