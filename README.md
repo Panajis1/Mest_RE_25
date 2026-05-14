@@ -37,6 +37,10 @@ scripts/
   train_models.py         # detector training CLI
   export_figures.py       # portfolio PNG export CLI
 
+notebooks/
+  re_nilm_demo.ipynb              # end-to-end library walkthrough
+  example_single_customer.ipynb   # detector usage for a single load curve
+
 models/                   # serialized model artifacts (+ local cache/output subdirs)
 data/                     # raw, processed, and output data
 figures/results/          # exported PNG figures
@@ -146,6 +150,8 @@ Important defaults:
 data:
   customer_type_filter: "Particuliers"
   max_consumption_kwh: 100_000
+  # training_data_path is unset in default.yaml; re_production.yaml pins it to
+  # data/processed_data/all_sources_load_with_weather.parquet
 
 pipeline:
   n_workers: 4
@@ -176,9 +182,10 @@ output:
   figures_dir: "figures/results"
 ```
 
-`config/re_production.yaml` currently overrides the data paths, enables all
-detectors, uses `n_workers: 4` (set to `"auto"` to use all cores), and sets
-PV capacity bootstrapping to `20` for faster iteration.
+`config/re_production.yaml` currently overrides the data paths (including
+`training_data_path`), enables all detectors, uses `n_workers: 4` (set to
+`"auto"` to use all cores), sets PV capacity bootstrapping to `20` for faster
+iteration, and raises the AC detector `prob_threshold` to `0.72`.
 
 ## Pipeline Workflow
 
@@ -373,25 +380,60 @@ After the pipeline has produced `results_all_customers.parquet`, run:
 python scripts/export_figures.py --config config/re_production.yaml
 ```
 
-The script writes PNG figures to `output.figures_dir`:
+The script writes PNG figures (and a couple of CSV summary tables) to
+`output.figures_dir` (default: `figures/results/`). Group by area:
+
+**Portfolio overview**
 
 | Figure | Description |
 |---|---|
-| `appliance_adoption_shares.png` | Share of customers classified as PV, AC, HP, battery, EV |
-| `appliance_probability_distributions.png` | Detector probability distributions |
-| `appliance_cooccurrence_heatmap.png` | Technology co-occurrence among customers |
-| `technology_portfolio_summaries.png` | Portfolio-level appliance summary panels |
-| `pv_installed_capacity_summary.png` | Aggregate PV capacity with uncertainty and PV counts |
-| `pv_capacity_distribution.png` | PV capacity distribution, x-axis capped at 100 kWp |
-| `pv_population_statistics.png` | PV capacity and population statistics |
-| `pv_capacity_vs_production.png` | Capacity vs annual PV production validation |
+| `appliance_adoption_shares.png` | Share of customers classified as PV, AC, HP, battery, EV with Wilson 95 % CI |
+| `technology_portfolio_summaries.png` | Multi-panel HP type / battery capacity / EV energy summaries |
 
-Static PNG export uses Plotly plus Kaleido. Install the dev extra if PNG export
-fails:
+**Per-appliance probability distributions (Plotly histograms)**
 
-```bash
-pip install -e ".[dev]"
-```
+| Figure | Description |
+|---|---|
+| `ac_probability_distribution.png` | AC detector probability histogram |
+| `hp_probability_distribution.png` | HP detector probability histogram |
+| `battery_probability_distribution.png` | Battery detector probability histogram |
+
+**PV**
+
+| Figure | Description |
+|---|---|
+| `pv_installed_capacity_summary.png` | Aggregate installed PV capacity (MWp) with CI |
+| `pv_capacity_distribution.png` | PV capacity histogram (x-axis capped at 100 kWp) |
+| `pv_population_statistics.png` | PV capacity + self-consumption histograms (capacity axis capped at 90 kWp) |
+| `pv_detection_summary.png` | 3-panel matplotlib summary of PV detector outcomes |
+| `pv_capacity_vs_sc_share.png` | Capacity vs self-consumption scatter |
+
+**Battery**
+
+| Figure | Description |
+|---|---|
+| `battery_capacity_histogram.png` | Distribution of estimated battery capacities (kWh) |
+| `battery_capacity_boxplot.png` | Capacity boxplots by status / PV mix |
+| `battery_capacity_coverage.png` | Share of detected battery customers with a numerical capacity estimate |
+| `battery_reliability_summary.png` | Detection probability vs. reliability margin breakdown |
+| `battery_probability_distribution_matplotlib.png` | Matplotlib histogram (with threshold marker) |
+| `battery_detected_share_pie.png` | Detected share pie chart |
+| `battery_status_breakdown.png` | Status code breakdown |
+| `battery_pv_split_pie.png` | PV vs. non-PV battery customer split |
+| `pv_vs_battery_capacity_scatter.png` | PV capacity vs. battery capacity scatter |
+| `battery_portfolio_overview_table.csv`, `battery_portfolio_summary_table.csv` | Aggregate portfolio tables |
+
+**Heat pump and EV**
+
+| Figure | Description |
+|---|---|
+| `hp_customer_mix_pie.png` | Winter / summer / no-HP customer mix |
+| `hp_annual_consumption_pdf.png` | KDE of estimated annual HP consumption (uses `hp_disagg_15min.parquet` if present) |
+| `ev_probability_distribution_hist.png` | EV detector probability histogram |
+
+Static PNG export uses Plotly plus Kaleido (`pip install -e ".[dev]"`). All
+Plotly figures inherit the `plotly_white` template so the background matches
+the matplotlib outputs.
 
 ## Training Models
 
@@ -409,21 +451,34 @@ output paths are overwritten.
 
 All four trainers consume the same raw training parquet
 `all_sources_load_with_weather.parquet` with columns
-`[type, source, dt_utc, glob_rad, value_kw_mean, id_customer, temp]`. Detector
-trainers also accept a pre-computed per-customer feature table.
+`[type, source, dt_local, dt_utc, glob_rad, value_kw_mean, id_customer, temp]`.
+Detector trainers also accept a pre-computed per-customer feature table.
+
+The bundled file aggregates rows from nine sources — `dataport`, `SCIENTIFIC
+DATA`, `Heapo`, `REFIT`, `ECO`, `Smartnialmeter`, `Caltech`, `pv estonia`,
+`uk_na_grid` (~36.6 M rows total). Appliance ground truth comes from the
+sources that carry per-appliance `type` rows (mostly `dataport`); `REFIT` and
+`ECO` contribute load context only.
+
+Path resolution (highest priority wins):
+
+1. `--training-data <path>` CLI flag
+2. `data.training_data_path` in the config (set in `config/re_production.yaml`
+   to `data/processed_data/all_sources_load_with_weather.parquet`)
+3. Hard-coded fallback `data/processed/training/all_sources_load_with_weather.parquet`
 
 ```bash
-# Train everything in one pass
+# Train everything in one pass (reads training_data_path from re_production.yaml)
 python scripts/train_models.py \
   --config config/re_production.yaml \
-  --training-data data/processed/training/all_sources_load_with_weather.parquet \
   --models ac_detector,hp_detector,ac_disaggregator,hp_disaggregator
 
 # Retrain only the AC disaggregator (e.g. after a feature-engineering change)
-python scripts/train_models.py --models ac_disaggregator
+python scripts/train_models.py --config config/re_production.yaml --models ac_disaggregator
 
 # Retrain only the HP disaggregator with a different training file
 python scripts/train_models.py \
+  --config config/re_production.yaml \
   --models hp_disaggregator \
   --training-data path/to/custom_training.parquet
 ```
@@ -473,20 +528,25 @@ Run the synthetic integration test suite:
 python -m pytest tests/integration/ -v -m integration
 ```
 
-## Demo Notebook
+## Notebooks
 
-`notebooks/re_nilm_demo.ipynb` is the detailed walkthrough. It covers:
+Two Jupyter notebooks live under `notebooks/`:
 
-1. Loading weather and the filtered customer index.
-2. Running detectors on a single customer.
-3. Training AC/HP models when labelled data is present.
-4. Running a small direct portfolio sample.
-5. Running or loading the full orchestrator output.
-6. Generating portfolio summaries.
-7. Mapping notebook cells to the equivalent CLI commands.
+- **`re_nilm_demo.ipynb`** — full library walkthrough:
+  1. Setup and inputs (paths, config, weather, customer index)
+  2. Single-customer detector + estimator calls
+  3. Training AC / HP models when labelled data is present
+  4. Small bounded portfolio sample
+  5. Running or loading the full orchestrator output
+  6. CLI reference mapping notebook cells to commands
 
-Keep `RUN_FULL_PIPELINE = False` unless you intentionally want to launch a full
-portfolio run from the notebook.
+  Keep `RUN_FULL_PIPELINE = False` unless you intentionally want to launch a
+  full portfolio run from the notebook.
+
+- **`example_single_customer.ipynb`** — minimal "library as a Python API"
+  example: how to call `PVDetector`, `BatteryDetector`, `ACDetector`, and
+  `HeatPumpDetector` directly on a single load curve without going through the
+  orchestrator.
 
 
 ## Troubleshooting
